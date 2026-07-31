@@ -1,0 +1,31 @@
+# Swift / SPM
+.build/
+.swiftpm/
+Package.resolved
+
+# Build output
+dist/
+*.app
+
+# Icons intermediate
+*.iconset
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*~
+
+# Logs / local
+*.log
+
+# Local only
+CHANGELOG.md
