@@ -1,44 +1,67 @@
 import AppKit
 import QuartzCore
 
+/// 设计稿布局：左侧边栏（分类/位置）+ 右侧搜索与结果
 final class SearchWindowController: NSWindowController, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate, NSMenuDelegate {
+    // MARK: State
     private var hits: [IndexEngine.Hit] = []
+    private var categoryCounts: [IndexEngine.Category: Int] = [:]
     private var lastMs: Double = 0
     private var searchGeneration = 0
-    private var currentSort: IndexEngine.SortKey = {
-        if let raw = UserDefaults.standard.string(forKey: "ff.defaultSort")
-            ?? UserDefaults.standard.string(forKey: "qqs.defaultSort"),
-           let k = IndexEngine.SortKey(rawValue: raw) {
-            return k
-        }
-        return .relevance
-    }()
-    private var contextRow: Int = -1
-    private var isAnimating = false
+    private var selectedCategory: IndexEngine.Category = .all
+    private var selectedLocationPath: String? = nil // nil = 全部
+    private var currentSort: IndexEngine.SortKey = .relevance
+    private var filterExt: String? = nil
+    private var filterMinSize: Int64? = nil
+    private var filterMaxSize: Int64? = nil
+    private var filterModifiedDays: Int? = nil // 近 N 天
+    private var contextRow = -1
+    private var isListView = true
 
-    private let chrome = NSVisualEffectView()
-    private let queryField = CenteredTextField()
+    // MARK: Chrome
+    private let rootView = NSView()
+    private let sidebar = NSView()
+    private let mainPane = NSView()
+    private let trafficButtons = TrafficButtonsView()
+
+    // Sidebar
+    private let brandIcon = NSImageView()
+    private let brandLabel = NSTextField(labelWithString: "FlashFind")
+    private let categoryStack = NSStackView()
+    private let locationStack = NSStackView()
+    private let sidebarSettingsBtn = NSButton()
+    private var categoryButtons: [IndexEngine.Category: SidebarRowButton] = [:]
+    private var locationButtons: [String: SidebarRowButton] = [:] // path -> btn, "" = all
+
+    // Main
+    private let headline = NSTextField(labelWithString: "搜索文件，快如闪电")
+    private let subhead = NSTextField(labelWithString: "输入关键词，立即找到你需要的文件")
+    private let hotkeyBadge = NSTextField(labelWithString: "")
+    private let searchCard = NSView()
     private let searchIcon = NSImageView()
-    private let sortPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let statusLabel = NSTextField(labelWithString: "")
+    private let queryField = CenteredTextField()
+    private let clearBtn = NSButton()
+    private let filterStack = NSStackView()
+    private let typeFilter = NSPopUpButton(frame: .zero, pullsDown: true)
+    private let timeFilter = NSPopUpButton(frame: .zero, pullsDown: true)
+    private let sizeFilter = NSPopUpButton(frame: .zero, pullsDown: true)
+    private let locFilter = NSPopUpButton(frame: .zero, pullsDown: true)
+    private let sortPopup = NSPopUpButton(frame: .zero, pullsDown: true)
+    private let listViewBtn = NSButton()
+    private let gridViewBtn = NSButton()
     private let scrollView = NSScrollView()
     private let tableView = NSTableView()
-    private let countLabel = NSTextField(labelWithString: "")
-    private let titleLabel = NSTextField(labelWithString: "FlashFind")
-    private let searchCard = NSView()
-    private let settingsButton = NSButton()
-    private let titleBar = NSView()
-    private let trafficButtons = TrafficButtonsView()
+    private let footerLabel = NSTextField(labelWithString: "")
+    private let footerHints = NSTextField(labelWithString: "↑↓ 选择    ↩ 打开    ⌘↩ 在访达中显示")
 
     private lazy var settingsWC = SettingsWindowController()
     var hotKeyHandler: ((HotKeyConfig) -> Void)?
     var rebuildHandler: (() -> Void)?
 
     convenience init() {
-        // 无系统标题栏：用自绘关闭/缩小，避免 fullSizeContentView 错位
         let win = KeyablePanel(
-            contentRect: NSRect(x: 0, y: 0, width: 720, height: 520),
-            styleMask: [.borderless, .fullSizeContentView],
+            contentRect: NSRect(x: 0, y: 0, width: 980, height: 640),
+            styleMask: [.borderless, .fullSizeContentView, .resizable],
             backing: .buffered,
             defer: false
         )
@@ -51,438 +74,689 @@ final class SearchWindowController: NSWindowController, NSWindowDelegate, NSTabl
         win.backgroundColor = .clear
         win.hasShadow = true
         win.isMovableByWindowBackground = true
-        win.minSize = NSSize(width: 560, height: 360)
+        win.minSize = NSSize(width: 820, height: 520)
         win.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         self.init(window: win)
         win.delegate = self
         buildUI()
     }
 
+    // MARK: - Build
+
     private func buildUI() {
         guard let window else { return }
-
-        // 内容视图铺满，毛玻璃与窗口边缘对齐 → 红绿灯落在窗口内
-        let content = NSView(frame: .zero)
+        let content = NSView()
         content.wantsLayer = true
-        content.layer?.backgroundColor = NSColor.clear.cgColor
         window.contentView = content
 
-        chrome.material = .sidebar
-        chrome.blendingMode = .behindWindow
-        chrome.state = .followsWindowActiveState
-        chrome.wantsLayer = true
-        chrome.layer?.cornerRadius = 14
-        chrome.layer?.masksToBounds = true
-        chrome.layer?.borderWidth = 0.5
-        chrome.layer?.borderColor = Theme.subtleBorder.cgColor
-        chrome.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(chrome)
+        rootView.wantsLayer = true
+        rootView.layer?.cornerRadius = 16
+        rootView.layer?.masksToBounds = true
+        rootView.layer?.borderWidth = 0.5
+        rootView.layer?.borderColor = Theme.subtleBorder.cgColor
+        rootView.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(rootView)
 
-        // 顶部栏：关闭 / 缩小 + 标题 + 设置（按钮在窗口内容内）
-        titleBar.translatesAutoresizingMaskIntoConstraints = false
+        // 侧边栏
+        sidebar.wantsLayer = true
+        sidebar.layer?.backgroundColor = Theme.sidebarBg.cgColor
+        sidebar.translatesAutoresizingMaskIntoConstraints = false
+        rootView.addSubview(sidebar)
+
         trafficButtons.translatesAutoresizingMaskIntoConstraints = false
-        trafficButtons.onClose = { [weak self] in
-            self?.dismissAnimated()
-        }
-        trafficButtons.onMinimize = { [weak self] in
-            self?.window?.miniaturize(nil)
-            // borderless 面板可能不支持 miniaturize，退化为隐藏
-            if self?.window?.isMiniaturized != true {
-                self?.window?.orderOut(nil)
-            }
-        }
+        trafficButtons.onClose = { [weak self] in self?.dismissAnimated() }
+        trafficButtons.onMinimize = { [weak self] in self?.window?.orderOut(nil) }
+        sidebar.addSubview(trafficButtons)
 
-        titleLabel.font = Theme.songBold(13)
-        titleLabel.textColor = Theme.accent
-        titleLabel.alignment = .center
-        titleLabel.isBezeled = false
-        titleLabel.drawsBackground = false
-        titleLabel.isEditable = false
-        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        brandIcon.image = NSImage(systemSymbolName: "bolt.fill", accessibilityDescription: nil)
+        brandIcon.contentTintColor = Theme.accent
+        brandIcon.translatesAutoresizingMaskIntoConstraints = false
+        brandLabel.font = Theme.ui(15, weight: .semibold)
+        brandLabel.textColor = Theme.titleText
+        brandLabel.translatesAutoresizingMaskIntoConstraints = false
+        sidebar.addSubview(brandIcon)
+        sidebar.addSubview(brandLabel)
 
-        settingsButton.bezelStyle = .regularSquare
-        settingsButton.isBordered = false
-        settingsButton.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: "设置")
-        settingsButton.image?.isTemplate = true
-        settingsButton.contentTintColor = .secondaryLabelColor
-        settingsButton.target = self
-        settingsButton.action = #selector(openSettings)
-        settingsButton.toolTip = "设置"
-        settingsButton.translatesAutoresizingMaskIntoConstraints = false
+        categoryStack.orientation = .vertical
+        categoryStack.alignment = .leading
+        categoryStack.spacing = 2
+        categoryStack.translatesAutoresizingMaskIntoConstraints = false
+        sidebar.addSubview(categoryStack)
 
-        // 搜索卡片 + 自绘放大镜 + 垂直居中文本框
+        let locTitle = makeSectionLabel("位置")
+        locTitle.translatesAutoresizingMaskIntoConstraints = false
+        sidebar.addSubview(locTitle)
+
+        locationStack.orientation = .vertical
+        locationStack.alignment = .leading
+        locationStack.spacing = 2
+        locationStack.translatesAutoresizingMaskIntoConstraints = false
+        sidebar.addSubview(locationStack)
+
+        sidebarSettingsBtn.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: "设置")
+        sidebarSettingsBtn.image?.isTemplate = true
+        sidebarSettingsBtn.isBordered = false
+        sidebarSettingsBtn.contentTintColor = Theme.secondaryText
+        sidebarSettingsBtn.target = self
+        sidebarSettingsBtn.action = #selector(openSettings)
+        sidebarSettingsBtn.translatesAutoresizingMaskIntoConstraints = false
+        sidebar.addSubview(sidebarSettingsBtn)
+
+        // 主区
+        mainPane.wantsLayer = true
+        mainPane.layer?.backgroundColor = Theme.contentBg.cgColor
+        mainPane.translatesAutoresizingMaskIntoConstraints = false
+        rootView.addSubview(mainPane)
+
+        headline.font = Theme.ui(22, weight: .bold)
+        headline.textColor = Theme.titleText
+        headline.translatesAutoresizingMaskIntoConstraints = false
+        subhead.font = Theme.ui(12.5)
+        subhead.textColor = Theme.secondaryText
+        subhead.translatesAutoresizingMaskIntoConstraints = false
+        hotkeyBadge.font = Theme.ui(11, weight: .medium)
+        hotkeyBadge.textColor = Theme.secondaryText
+        hotkeyBadge.alignment = .center
+        hotkeyBadge.wantsLayer = true
+        hotkeyBadge.layer?.cornerRadius = 8
+        hotkeyBadge.layer?.backgroundColor = Theme.chipBg.cgColor
+        hotkeyBadge.translatesAutoresizingMaskIntoConstraints = false
+
+        mainPane.addSubview(headline)
+        mainPane.addSubview(subhead)
+        mainPane.addSubview(hotkeyBadge)
+
+        // 搜索框
         searchCard.wantsLayer = true
-        searchCard.layer?.cornerRadius = 11
-        searchCard.layer?.backgroundColor = Theme.cardFill.cgColor
-        searchCard.layer?.borderWidth = 1
-        searchCard.layer?.borderColor = Theme.subtleBorder.cgColor
+        searchCard.layer?.cornerRadius = 12
+        searchCard.layer?.borderWidth = 1.5
+        searchCard.layer?.borderColor = Theme.accent.withAlphaComponent(0.55).cgColor
+        searchCard.layer?.backgroundColor = Theme.contentBg.cgColor
         searchCard.translatesAutoresizingMaskIntoConstraints = false
+        mainPane.addSubview(searchCard)
 
-        searchIcon.image = MenuBarIcon.make(size: 16)
-        searchIcon.image?.isTemplate = true
-        searchIcon.contentTintColor = .secondaryLabelColor
-        searchIcon.imageScaling = .scaleProportionallyUpOrDown
+        searchIcon.image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: nil)
+        searchIcon.contentTintColor = Theme.secondaryText
         searchIcon.translatesAutoresizingMaskIntoConstraints = false
-
-        queryField.placeholderString = "搜索文件名…"
-        queryField.font = Theme.songBold(16)
+        queryField.placeholderString = "输入关键词搜索…"
+        queryField.font = Theme.ui(15)
         queryField.isBordered = false
-        queryField.isBezeled = false
         queryField.drawsBackground = false
         queryField.focusRingType = .none
         queryField.delegate = self
         queryField.translatesAutoresizingMaskIntoConstraints = false
         if let cell = queryField.cell as? NSTextFieldCell {
-            cell.isScrollable = true
-            cell.wraps = false
-            cell.usesSingleLineMode = true
-            cell.font = Theme.songBold(16)
-            // placeholder 同样用宋体粗，颜色次要
             cell.placeholderAttributedString = NSAttributedString(
-                string: "搜索文件名…",
-                attributes: [
-                    .font: Theme.songBold(16),
-                    .foregroundColor: NSColor.placeholderTextColor,
-                    .baselineOffset: 0,
-                ]
+                string: "输入关键词搜索…",
+                attributes: [.font: Theme.ui(15), .foregroundColor: NSColor.placeholderTextColor]
             )
         }
+        clearBtn.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "清除")
+        clearBtn.image?.isTemplate = true
+        clearBtn.isBordered = false
+        clearBtn.contentTintColor = Theme.metaText
+        clearBtn.target = self
+        clearBtn.action = #selector(clearQuery)
+        clearBtn.isHidden = true
+        clearBtn.translatesAutoresizingMaskIntoConstraints = false
+        searchCard.addSubview(searchIcon)
+        searchCard.addSubview(queryField)
+        searchCard.addSubview(clearBtn)
 
-        sortPopup.translatesAutoresizingMaskIntoConstraints = false
-        sortPopup.controlSize = .small
-        sortPopup.font = Theme.songBold(11)
-        sortPopup.bezelStyle = .inline
-        sortPopup.isBordered = false
-        sortPopup.removeAllItems()
-        for key in IndexEngine.SortKey.allCases {
-            sortPopup.addItem(withTitle: key.rawValue)
+        // 过滤条
+        filterStack.orientation = .horizontal
+        filterStack.spacing = 8
+        filterStack.translatesAutoresizingMaskIntoConstraints = false
+        mainPane.addSubview(filterStack)
+
+        configureFilter(typeFilter, title: "类型", items: [
+            ("全部类型", ""),
+            ("文件夹", "folder"),
+            ("应用", "app"),
+            ("PDF", "pdf"),
+            ("图片", "image"),
+            ("文档", "doc"),
+            ("表格", "sheet"),
+            ("演示", "slide"),
+            ("视频", "video"),
+            ("音频", "audio"),
+            ("压缩包", "archive"),
+            ("代码", "code"),
+        ], action: #selector(typeFilterChanged))
+        configureFilter(timeFilter, title: "修改时间", items: [
+            ("不限时间", ""),
+            ("今天", "1"),
+            ("近 7 天", "7"),
+            ("近 30 天", "30"),
+            ("近一年", "365"),
+        ], action: #selector(timeFilterChanged))
+        configureFilter(sizeFilter, title: "大小", items: [
+            ("不限大小", ""),
+            ("< 1 MB", "0-1"),
+            ("1 – 10 MB", "1-10"),
+            ("10 – 100 MB", "10-100"),
+            ("> 100 MB", "100-"),
+        ], action: #selector(sizeFilterChanged))
+        configureFilter(locFilter, title: "位置", items: [("全部位置", "")], action: #selector(locFilterChanged))
+
+        for b in [typeFilter, timeFilter, sizeFilter, locFilter] {
+            styleChipPopup(b)
+            filterStack.addArrangedSubview(b)
         }
-        if let idx = IndexEngine.SortKey.allCases.firstIndex(of: currentSort) {
-            sortPopup.selectItem(at: idx)
+
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        filterStack.addArrangedSubview(spacer)
+
+        configureFilter(sortPopup, title: "相关性", items: IndexEngine.SortKey.allCases.map { ($0.rawValue, $0.rawValue) }, action: #selector(sortChanged))
+        styleChipPopup(sortPopup)
+        filterStack.addArrangedSubview(sortPopup)
+
+        listViewBtn.image = NSImage(systemSymbolName: "list.bullet", accessibilityDescription: "列表")
+        gridViewBtn.image = NSImage(systemSymbolName: "square.grid.2x2", accessibilityDescription: "网格")
+        for b in [listViewBtn, gridViewBtn] {
+            b.isBordered = false
+            b.image?.isTemplate = true
+            b.translatesAutoresizingMaskIntoConstraints = false
+            b.widthAnchor.constraint(equalToConstant: 28).isActive = true
+            b.heightAnchor.constraint(equalToConstant: 28).isActive = true
+            filterStack.addArrangedSubview(b)
         }
-        sortPopup.target = self
-        sortPopup.action = #selector(sortChanged)
+        listViewBtn.target = self
+        listViewBtn.action = #selector(showList)
+        gridViewBtn.target = self
+        gridViewBtn.action = #selector(showGrid)
+        updateViewToggle()
 
-        let sortCaption = NSTextField(labelWithString: "排序")
-        sortCaption.font = Theme.songBold(11)
-        sortCaption.textColor = Theme.secondaryText
-        sortCaption.translatesAutoresizingMaskIntoConstraints = false
-
-        statusLabel.font = Theme.songBold(11)
-        statusLabel.textColor = Theme.secondaryText
-        statusLabel.translatesAutoresizingMaskIntoConstraints = false
-
-        countLabel.font = Theme.songBold(11)
-        countLabel.textColor = Theme.metaText
-        countLabel.alignment = .right
-        countLabel.translatesAutoresizingMaskIntoConstraints = false
-
+        // 结果表
         tableView.headerView = nil
-        tableView.rowHeight = 44
-        tableView.style = .plain
+        tableView.rowHeight = 56
         tableView.backgroundColor = .clear
-        tableView.usesAlternatingRowBackgroundColors = false
         tableView.selectionHighlightStyle = .regular
+        tableView.style = .plain
         tableView.doubleAction = #selector(openSelected)
         tableView.target = self
         tableView.dataSource = self
         tableView.delegate = self
-        tableView.allowsEmptySelection = false
-        tableView.intercellSpacing = NSSize(width: 0, height: 2)
-        tableView.menu = {
-            let m = NSMenu()
-            m.delegate = self
-            return m
-        }()
-
-        let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("main"))
-        col.width = 680
+        tableView.intercellSpacing = NSSize(width: 0, height: 0)
+        tableView.menu = { let m = NSMenu(); m.delegate = self; return m }()
+        let col = NSTableColumn(identifier: .init("main"))
+        col.width = 700
         tableView.addTableColumn(col)
 
         scrollView.documentView = tableView
+        scrollView.drawsBackground = false
+        scrollView.borderType = .noBorder
         scrollView.hasVerticalScroller = true
         scrollView.scrollerStyle = .overlay
-        scrollView.borderType = .noBorder
-        scrollView.drawsBackground = false
-        scrollView.backgroundColor = .clear
         scrollView.translatesAutoresizingMaskIntoConstraints = false
+        mainPane.addSubview(scrollView)
 
-        chrome.addSubview(titleBar)
-        titleBar.addSubview(trafficButtons)
-        titleBar.addSubview(titleLabel)
-        titleBar.addSubview(settingsButton)
-        chrome.addSubview(searchCard)
-        searchCard.addSubview(searchIcon)
-        searchCard.addSubview(queryField)
-        chrome.addSubview(sortCaption)
-        chrome.addSubview(sortPopup)
-        chrome.addSubview(statusLabel)
-        chrome.addSubview(countLabel)
-        chrome.addSubview(scrollView)
+        footerLabel.font = Theme.ui(11)
+        footerLabel.textColor = Theme.secondaryText
+        footerLabel.translatesAutoresizingMaskIntoConstraints = false
+        footerHints.font = Theme.ui(11)
+        footerHints.textColor = Theme.metaText
+        footerHints.alignment = .right
+        footerHints.translatesAutoresizingMaskIntoConstraints = false
+        mainPane.addSubview(footerLabel)
+        mainPane.addSubview(footerHints)
 
         NSLayoutConstraint.activate([
-            chrome.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-            chrome.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            chrome.topAnchor.constraint(equalTo: content.topAnchor),
-            chrome.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            rootView.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            rootView.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            rootView.topAnchor.constraint(equalTo: content.topAnchor),
+            rootView.bottomAnchor.constraint(equalTo: content.bottomAnchor),
 
-            // 顶部栏在窗口内：关闭 / 缩小 明确可见
-            titleBar.leadingAnchor.constraint(equalTo: chrome.leadingAnchor),
-            titleBar.trailingAnchor.constraint(equalTo: chrome.trailingAnchor),
-            titleBar.topAnchor.constraint(equalTo: chrome.topAnchor),
-            titleBar.heightAnchor.constraint(equalToConstant: 44),
+            sidebar.leadingAnchor.constraint(equalTo: rootView.leadingAnchor),
+            sidebar.topAnchor.constraint(equalTo: rootView.topAnchor),
+            sidebar.bottomAnchor.constraint(equalTo: rootView.bottomAnchor),
+            sidebar.widthAnchor.constraint(equalToConstant: 200),
 
-            trafficButtons.leadingAnchor.constraint(equalTo: titleBar.leadingAnchor),
-            trafficButtons.centerYAnchor.constraint(equalTo: titleBar.centerYAnchor),
-            trafficButtons.widthAnchor.constraint(equalToConstant: 60),
-            trafficButtons.heightAnchor.constraint(equalToConstant: 24),
+            trafficButtons.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 4),
+            trafficButtons.topAnchor.constraint(equalTo: sidebar.topAnchor, constant: 10),
+            trafficButtons.widthAnchor.constraint(equalToConstant: 56),
+            trafficButtons.heightAnchor.constraint(equalToConstant: 20),
 
-            titleLabel.centerYAnchor.constraint(equalTo: titleBar.centerYAnchor),
-            titleLabel.centerXAnchor.constraint(equalTo: titleBar.centerXAnchor),
+            brandIcon.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 18),
+            brandIcon.topAnchor.constraint(equalTo: trafficButtons.bottomAnchor, constant: 14),
+            brandIcon.widthAnchor.constraint(equalToConstant: 18),
+            brandIcon.heightAnchor.constraint(equalToConstant: 18),
+            brandLabel.leadingAnchor.constraint(equalTo: brandIcon.trailingAnchor, constant: 6),
+            brandLabel.centerYAnchor.constraint(equalTo: brandIcon.centerYAnchor),
 
-            settingsButton.centerYAnchor.constraint(equalTo: titleBar.centerYAnchor),
-            settingsButton.trailingAnchor.constraint(equalTo: titleBar.trailingAnchor, constant: -12),
-            settingsButton.widthAnchor.constraint(equalToConstant: 28),
-            settingsButton.heightAnchor.constraint(equalToConstant: 28),
+            categoryStack.topAnchor.constraint(equalTo: brandIcon.bottomAnchor, constant: 20),
+            categoryStack.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 10),
+            categoryStack.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -10),
 
-            searchCard.topAnchor.constraint(equalTo: titleBar.bottomAnchor, constant: 2),
-            searchCard.leadingAnchor.constraint(equalTo: chrome.leadingAnchor, constant: 16),
-            searchCard.trailingAnchor.constraint(equalTo: chrome.trailingAnchor, constant: -16),
+            locTitle.topAnchor.constraint(equalTo: categoryStack.bottomAnchor, constant: 18),
+            locTitle.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 18),
+
+            locationStack.topAnchor.constraint(equalTo: locTitle.bottomAnchor, constant: 6),
+            locationStack.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 10),
+            locationStack.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -10),
+
+            sidebarSettingsBtn.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 16),
+            sidebarSettingsBtn.bottomAnchor.constraint(equalTo: sidebar.bottomAnchor, constant: -14),
+            sidebarSettingsBtn.widthAnchor.constraint(equalToConstant: 24),
+            sidebarSettingsBtn.heightAnchor.constraint(equalToConstant: 24),
+
+            mainPane.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor),
+            mainPane.trailingAnchor.constraint(equalTo: rootView.trailingAnchor),
+            mainPane.topAnchor.constraint(equalTo: rootView.topAnchor),
+            mainPane.bottomAnchor.constraint(equalTo: rootView.bottomAnchor),
+
+            headline.topAnchor.constraint(equalTo: mainPane.topAnchor, constant: 28),
+            headline.leadingAnchor.constraint(equalTo: mainPane.leadingAnchor, constant: 28),
+            subhead.topAnchor.constraint(equalTo: headline.bottomAnchor, constant: 4),
+            subhead.leadingAnchor.constraint(equalTo: headline.leadingAnchor),
+            hotkeyBadge.centerYAnchor.constraint(equalTo: headline.centerYAnchor),
+            hotkeyBadge.trailingAnchor.constraint(equalTo: mainPane.trailingAnchor, constant: -28),
+            hotkeyBadge.widthAnchor.constraint(greaterThanOrEqualToConstant: 52),
+            hotkeyBadge.heightAnchor.constraint(equalToConstant: 26),
+
+            searchCard.topAnchor.constraint(equalTo: subhead.bottomAnchor, constant: 18),
+            searchCard.leadingAnchor.constraint(equalTo: mainPane.leadingAnchor, constant: 28),
+            searchCard.trailingAnchor.constraint(equalTo: mainPane.trailingAnchor, constant: -28),
             searchCard.heightAnchor.constraint(equalToConstant: 44),
 
             searchIcon.leadingAnchor.constraint(equalTo: searchCard.leadingAnchor, constant: 14),
             searchIcon.centerYAnchor.constraint(equalTo: searchCard.centerYAnchor),
             searchIcon.widthAnchor.constraint(equalToConstant: 16),
             searchIcon.heightAnchor.constraint(equalToConstant: 16),
-
-            // 文本框在卡片内垂直居中（配合 CenteredTextFieldCell）
+            clearBtn.trailingAnchor.constraint(equalTo: searchCard.trailingAnchor, constant: -10),
+            clearBtn.centerYAnchor.constraint(equalTo: searchCard.centerYAnchor),
+            clearBtn.widthAnchor.constraint(equalToConstant: 20),
+            clearBtn.heightAnchor.constraint(equalToConstant: 20),
             queryField.leadingAnchor.constraint(equalTo: searchIcon.trailingAnchor, constant: 10),
-            queryField.trailingAnchor.constraint(equalTo: searchCard.trailingAnchor, constant: -14),
-            queryField.topAnchor.constraint(equalTo: searchCard.topAnchor, constant: 0),
-            queryField.bottomAnchor.constraint(equalTo: searchCard.bottomAnchor, constant: 0),
+            queryField.trailingAnchor.constraint(equalTo: clearBtn.leadingAnchor, constant: -6),
+            queryField.topAnchor.constraint(equalTo: searchCard.topAnchor),
+            queryField.bottomAnchor.constraint(equalTo: searchCard.bottomAnchor),
 
-            sortCaption.topAnchor.constraint(equalTo: searchCard.bottomAnchor, constant: 10),
-            sortCaption.leadingAnchor.constraint(equalTo: searchCard.leadingAnchor, constant: 2),
+            filterStack.topAnchor.constraint(equalTo: searchCard.bottomAnchor, constant: 12),
+            filterStack.leadingAnchor.constraint(equalTo: searchCard.leadingAnchor),
+            filterStack.trailingAnchor.constraint(equalTo: searchCard.trailingAnchor),
+            filterStack.heightAnchor.constraint(equalToConstant: 32),
 
-            sortPopup.centerYAnchor.constraint(equalTo: sortCaption.centerYAnchor),
-            sortPopup.leadingAnchor.constraint(equalTo: sortCaption.trailingAnchor, constant: 4),
+            scrollView.topAnchor.constraint(equalTo: filterStack.bottomAnchor, constant: 8),
+            scrollView.leadingAnchor.constraint(equalTo: mainPane.leadingAnchor, constant: 12),
+            scrollView.trailingAnchor.constraint(equalTo: mainPane.trailingAnchor, constant: -12),
+            scrollView.bottomAnchor.constraint(equalTo: footerLabel.topAnchor, constant: -8),
 
-            statusLabel.centerYAnchor.constraint(equalTo: sortCaption.centerYAnchor),
-            statusLabel.leadingAnchor.constraint(equalTo: sortPopup.trailingAnchor, constant: 12),
-
-            countLabel.centerYAnchor.constraint(equalTo: sortCaption.centerYAnchor),
-            countLabel.trailingAnchor.constraint(equalTo: searchCard.trailingAnchor),
-            countLabel.leadingAnchor.constraint(greaterThanOrEqualTo: statusLabel.trailingAnchor, constant: 8),
-
-            scrollView.topAnchor.constraint(equalTo: sortCaption.bottomAnchor, constant: 8),
-            scrollView.leadingAnchor.constraint(equalTo: chrome.leadingAnchor, constant: 8),
-            scrollView.trailingAnchor.constraint(equalTo: chrome.trailingAnchor, constant: -8),
-            scrollView.bottomAnchor.constraint(equalTo: chrome.bottomAnchor, constant: -10),
+            footerLabel.leadingAnchor.constraint(equalTo: searchCard.leadingAnchor),
+            footerLabel.bottomAnchor.constraint(equalTo: mainPane.bottomAnchor, constant: -14),
+            footerHints.trailingAnchor.constraint(equalTo: searchCard.trailingAnchor),
+            footerHints.centerYAnchor.constraint(equalTo: footerLabel.centerYAnchor),
         ])
 
-        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            self?.handleKey(event) ?? event
-        }
+        rebuildCategorySidebar()
+        rebuildLocationSidebar()
+        refreshHotkeyBadge()
 
-        // 绑定设置
         settingsWC.onHotKeyChanged = { [weak self] cfg in
             self?.hotKeyHandler?(cfg)
-            self?.refreshStatusLine()
+            self?.refreshHotkeyBadge()
         }
-        settingsWC.onRequestRebuild = { [weak self] in
-            self?.rebuildHandler?()
-        }
+        settingsWC.onRequestRebuild = { [weak self] in self?.rebuildHandler?() }
 
-        DistributedNotificationCenter.default.addObserver(
-            forName: Notification.Name("AppleInterfaceThemeChangedNotification"),
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            self?.refreshChrome()
+        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
+            self?.handleKey(e) ?? e
         }
     }
 
-    private func refreshChrome() {
-        chrome.layer?.borderColor = Theme.subtleBorder.cgColor
-        searchCard.layer?.backgroundColor = Theme.cardFill.cgColor
-        searchCard.layer?.borderColor = Theme.subtleBorder.cgColor
-        titleLabel.textColor = Theme.accent
-        searchIcon.contentTintColor = .secondaryLabelColor
+    private func makeSectionLabel(_ t: String) -> NSTextField {
+        let l = NSTextField(labelWithString: t)
+        l.font = Theme.ui(11, weight: .medium)
+        l.textColor = Theme.metaText
+        return l
     }
 
-    // MARK: - Animation
+    private func configureFilter(_ btn: NSPopUpButton, title: String, items: [(String, String)], action: Selector) {
+        btn.removeAllItems()
+        btn.autoenablesItems = false
+        // pullsDown 第一项为标题
+        btn.pullsDown = true
+        btn.addItem(withTitle: title)
+        for (label, value) in items {
+            let item = NSMenuItem(title: label, action: action, keyEquivalent: "")
+            item.target = self
+            item.representedObject = value
+            btn.menu?.addItem(item)
+        }
+        btn.font = Theme.ui(12)
+    }
+
+    private func styleChipPopup(_ btn: NSPopUpButton) {
+        btn.bezelStyle = .rounded
+        btn.controlSize = .regular
+        btn.translatesAutoresizingMaskIntoConstraints = false
+        btn.widthAnchor.constraint(greaterThanOrEqualToConstant: 88).isActive = true
+    }
+
+    private func rebuildCategorySidebar() {
+        categoryStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        categoryButtons.removeAll()
+        for cat in IndexEngine.Category.allCases {
+            let count = categoryCounts[cat] ?? (cat == .all ? hits.count : 0)
+            let row = SidebarRowButton(title: cat.rawValue, symbol: cat.symbol, count: count)
+            row.isSelected = (cat == selectedCategory)
+            row.onTap = { [weak self] in
+                self?.selectedCategory = cat
+                self?.rebuildCategorySidebar()
+                self?.runSearch()
+            }
+            categoryButtons[cat] = row
+            categoryStack.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: categoryStack.widthAnchor).isActive = true
+        }
+    }
+
+    private func rebuildLocationSidebar() {
+        locationStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        locationButtons.removeAll()
+
+        let all = SidebarRowButton(title: "全部位置", symbol: "internaldrive", count: nil)
+        all.isSelected = selectedLocationPath == nil
+        all.onTap = { [weak self] in
+            self?.selectedLocationPath = nil
+            self?.rebuildLocationSidebar()
+            self?.runSearch()
+        }
+        locationButtons[""] = all
+        locationStack.addArrangedSubview(all)
+        all.widthAnchor.constraint(equalTo: locationStack.widthAnchor).isActive = true
+
+        // Macintosh HD
+        let hd = SidebarRowButton(title: "Macintosh HD", symbol: "desktopcomputer", count: nil)
+        hd.isSelected = selectedLocationPath == "/"
+        hd.onTap = { [weak self] in
+            self?.selectedLocationPath = "/"
+            self?.rebuildLocationSidebar()
+            self?.runSearch()
+        }
+        locationButtons["/"] = hd
+        locationStack.addArrangedSubview(hd)
+        hd.widthAnchor.constraint(equalTo: locationStack.widthAnchor).isActive = true
+
+        for loc in IndexEngine.shared.indexedLocations() where loc.path != "/" {
+            let path = loc.path
+            let row = SidebarRowButton(title: loc.title, symbol: "folder", count: nil)
+            row.isSelected = selectedLocationPath == path
+            row.onTap = { [weak self] in
+                self?.selectedLocationPath = path
+                self?.rebuildLocationSidebar()
+                self?.runSearch()
+            }
+            locationButtons[path] = row
+            locationStack.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: locationStack.widthAnchor).isActive = true
+        }
+
+        let add = SidebarRowButton(title: "添加位置…", symbol: "plus", count: nil)
+        add.isAddStyle = true
+        add.onTap = { [weak self] in self?.addLocation() }
+        locationStack.addArrangedSubview(add)
+        add.widthAnchor.constraint(equalTo: locationStack.widthAnchor).isActive = true
+
+        // 同步顶栏位置筛选
+        refreshLocFilterMenu()
+    }
+
+    private func refreshLocFilterMenu() {
+        locFilter.removeAllItems()
+        locFilter.pullsDown = true
+        locFilter.addItem(withTitle: "位置")
+        let all = NSMenuItem(title: "全部位置", action: #selector(locFilterChanged), keyEquivalent: "")
+        all.target = self
+        all.representedObject = ""
+        locFilter.menu?.addItem(all)
+        for loc in IndexEngine.shared.indexedLocations() {
+            let item = NSMenuItem(title: loc.title, action: #selector(locFilterChanged), keyEquivalent: "")
+            item.target = self
+            item.representedObject = loc.path
+            locFilter.menu?.addItem(item)
+        }
+    }
+
+    // MARK: - Present
 
     func present() {
         guard let window else { return }
-        refreshChrome()
+        applyThemeColors()
+        rebuildLocationSidebar()
+        refreshHotkeyBadge()
 
-        let end = targetFrame(for: window)
+        let end = targetFrame(window)
         var start = end
-        let scale: CGFloat = 0.96
-        start.size.width = end.width * scale
-        start.size.height = end.height * scale
+        start.size.width *= 0.97
+        start.size.height *= 0.97
         start.origin.x = end.midX - start.width / 2
-        start.origin.y = end.origin.y - 14
-
+        start.origin.y = end.origin.y - 12
         window.setFrame(start, display: true)
         window.alphaValue = 0
-
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(queryField)
-        refreshStatusLine()
 
-        isAnimating = true
         NSAnimationContext.runAnimationGroup({ ctx in
-            ctx.duration = 0.36
-            ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.16, 1.0, 0.3, 1.0)
-            ctx.allowsImplicitAnimation = true
+            ctx.duration = 0.34
+            ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.16, 1, 0.3, 1)
             window.animator().alphaValue = 1
             window.animator().setFrame(end, display: true)
-        }, completionHandler: { [weak self] in
-            self?.isAnimating = false
-            if let layer = self?.chrome.layer {
-                let anim = CASpringAnimation(keyPath: "transform.scale")
-                anim.fromValue = 0.99
-                anim.toValue = 1.0
-                anim.mass = 0.6
-                anim.stiffness = 200
-                anim.damping = 18
-                anim.duration = anim.settlingDuration
-                layer.add(anim, forKey: "spring")
-            }
         })
-
-        if !queryField.stringValue.isEmpty {
-            runSearch()
-        }
+        if !queryField.stringValue.isEmpty { runSearch() }
+        else { updateFooter() }
     }
 
     func dismissAnimated() {
         guard let window, window.isVisible else { return }
-        isAnimating = true
         var end = window.frame
-        end.origin.y -= 10
+        end.origin.y -= 8
         end.size.width *= 0.98
         end.size.height *= 0.98
-        end.origin.x += window.frame.width * 0.01
-
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.2
-            ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
             window.animator().alphaValue = 0
             window.animator().setFrame(end, display: true)
         }, completionHandler: {
             window.orderOut(nil)
             window.alphaValue = 1
-            self.isAnimating = false
         })
     }
 
-    private func targetFrame(for window: NSWindow) -> NSRect {
-        let size = window.frame.size.width > 100 ? window.frame.size : NSSize(width: 720, height: 520)
-        guard let screen = NSScreen.main else {
-            return NSRect(origin: .zero, size: size)
-        }
-        let vis = screen.visibleFrame
-        return NSRect(
-            x: vis.midX - size.width / 2,
-            y: vis.midY - size.height / 2 + 48,
-            width: size.width,
-            height: size.height
-        )
+    private func targetFrame(_ window: NSWindow) -> NSRect {
+        let size = window.frame.size.width > 100 ? window.frame.size : NSSize(width: 980, height: 640)
+        guard let s = NSScreen.main else { return NSRect(origin: .zero, size: size) }
+        let v = s.visibleFrame
+        return NSRect(x: v.midX - size.width / 2, y: v.midY - size.height / 2 + 30, width: size.width, height: size.height)
+    }
+
+    private func applyThemeColors() {
+        sidebar.layer?.backgroundColor = Theme.sidebarBg.cgColor
+        mainPane.layer?.backgroundColor = Theme.contentBg.cgColor
+        rootView.layer?.borderColor = Theme.subtleBorder.cgColor
+        searchCard.layer?.backgroundColor = Theme.contentBg.cgColor
     }
 
     func setIndexStatus(_ text: String) {
-        statusLabel.stringValue = text
-    }
-
-    func updateHotKeyHint() {
-        refreshStatusLine()
-    }
-
-    private func refreshStatusLine() {
-        let n = IndexEngine.shared.fileCount
-        let hk = HotKeyConfig.load().display
-        if IndexEngine.shared.isIndexing {
-            statusLabel.stringValue = "索引中… \(n) 项"
-        } else if n == 0 {
-            statusLabel.stringValue = "正在准备索引…"
-        } else {
-            statusLabel.stringValue = "\(n) 项 · \(hk)"
+        if queryField.stringValue.isEmpty {
+            footerLabel.stringValue = text
         }
     }
 
-    // MARK: - Settings
+    func updateHotKeyHint() { refreshHotkeyBadge() }
 
-    @objc func openSettings() {
-        settingsWC.present()
+    private func refreshHotkeyBadge() {
+        let d = HotKeyConfig.load().display
+        hotkeyBadge.stringValue = "  \(d)  "
     }
 
     // MARK: - Search
 
-    @objc private func sortChanged() {
-        guard let title = sortPopup.selectedItem?.title,
-              let key = IndexEngine.SortKey(rawValue: title) else { return }
-        currentSort = key
-        UserDefaults.standard.set(key.rawValue, forKey: "ff.defaultSort")
-        if !hits.isEmpty { resortCurrentHits() } else { runSearch() }
-    }
-
-    private func resortCurrentHits() {
-        let gen = searchGeneration
-        var list = hits
-        let sort = currentSort
-        let needle = queryField.stringValue.lowercased()
-        DispatchQueue.global(qos: .userInteractive).async { [weak self] in
-            if sort.needsMetadata { IndexEngine.shared.enrichMetadata(&list) }
-            list = IndexEngine.sortHits(list, by: sort, needle: needle)
-            DispatchQueue.main.async {
-                guard let self, gen == self.searchGeneration else { return }
-                self.hits = list
-                self.tableView.reloadData()
-                if !list.isEmpty {
-                    self.tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
-                }
-                self.updateCountLabel()
-            }
+    private func buildOptions() -> IndexEngine.SearchOptions {
+        var opt = IndexEngine.SearchOptions()
+        opt.category = selectedCategory
+        opt.locationPrefix = selectedLocationPath
+        opt.sort = currentSort
+        opt.limit = 200
+        opt.alwaysEnrich = true
+        opt.fileExtension = filterExt
+        opt.minSize = filterMinSize
+        opt.maxSize = filterMaxSize
+        if let days = filterModifiedDays {
+            opt.modifiedAfter = Calendar.current.date(byAdding: .day, value: -days, to: Date())
         }
+        // 类型快捷：folder/app 映射到 category
+        return opt
     }
 
     private func runSearch() {
-        let q = queryField.stringValue
+        let q = queryField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        clearBtn.isHidden = q.isEmpty
         searchGeneration += 1
         let gen = searchGeneration
-        let sort = currentSort
+        var opt = buildOptions()
 
-        if q.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        // 类型筛选里的特殊值
+        if filterExt == "folder" {
+            opt.category = .folder
+            opt.fileExtension = nil
+        } else if filterExt == "app" {
+            opt.category = .app
+            opt.fileExtension = nil
+        } else if filterExt == "image" {
+            opt.fileExtension = nil // 后过滤
+        }
+
+        if q.isEmpty {
             hits = []
+            categoryCounts = [:]
             lastMs = 0
-            countLabel.stringValue = ""
             tableView.reloadData()
+            rebuildCategorySidebar()
+            updateFooter()
             return
         }
 
         DispatchQueue.global(qos: .userInteractive).async { [weak self] in
-            let result = IndexEngine.shared.search(query: q, sort: sort, limit: 200)
+            let result = IndexEngine.shared.search(query: q, options: opt)
+            var list = result.hits
+            // 图片/文档等扩展组过滤
+            if let g = self?.filterExt, ["image", "doc", "sheet", "slide", "video", "audio", "archive", "code"].contains(g) {
+                list = list.filter { Self.matchesGroup(g, hit: $0) }
+            }
             DispatchQueue.main.async {
                 guard let self, gen == self.searchGeneration else { return }
-                self.hits = result.hits
+                self.hits = list
+                self.categoryCounts = result.counts
                 self.lastMs = result.elapsedMs
-                self.updateCountLabel()
                 self.tableView.reloadData()
-                if !result.hits.isEmpty {
+                if !list.isEmpty {
                     self.tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
                 }
+                self.rebuildCategorySidebar()
+                self.updateFooter()
             }
         }
     }
 
-    private func updateCountLabel() {
-        if hits.isEmpty {
-            countLabel.stringValue = lastMs > 0 ? String(format: "0 条 · %.1f ms", lastMs) : ""
+    private static func matchesGroup(_ g: String, hit: IndexEngine.Hit) -> Bool {
+        let e = hit.fileExtension
+        switch g {
+        case "image": return ["png", "jpg", "jpeg", "gif", "webp", "heic", "tiff", "bmp", "svg"].contains(e)
+        case "doc": return ["pdf", "doc", "docx", "txt", "rtf", "md", "pages"].contains(e)
+        case "sheet": return ["xls", "xlsx", "csv", "numbers"].contains(e)
+        case "slide": return ["ppt", "pptx", "key"].contains(e)
+        case "video": return ["mp4", "mov", "m4v", "avi", "mkv", "webm"].contains(e)
+        case "audio": return ["mp3", "wav", "aac", "m4a", "flac", "aiff"].contains(e)
+        case "archive": return ["zip", "rar", "7z", "tar", "gz", "dmg"].contains(e)
+        case "code": return ["swift", "py", "js", "ts", "java", "go", "rs", "c", "cpp", "h", "json", "xml", "html", "css"].contains(e)
+        default: return true
+        }
+    }
+
+    private func updateFooter() {
+        if queryField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            footerLabel.stringValue = IndexEngine.shared.isIndexing
+                ? "索引中… \(IndexEngine.shared.fileCount) 项"
+                : "索引 \(IndexEngine.shared.fileCount) 项 · 输入关键词开始搜索"
         } else {
-            countLabel.stringValue = String(format: "%d 条 · %.1f ms", hits.count, lastMs)
+            footerLabel.stringValue = String(format: "共找到 %d 个结果 · %.1f ms", hits.count, lastMs)
+        }
+    }
+
+    // MARK: - Filters actions
+
+    @objc private func typeFilterChanged(_ sender: NSMenuItem) {
+        let v = sender.representedObject as? String ?? ""
+        filterExt = v.isEmpty ? nil : v
+        typeFilter.item(at: 0)?.title = v.isEmpty ? "类型" : sender.title
+        runSearch()
+    }
+
+    @objc private func timeFilterChanged(_ sender: NSMenuItem) {
+        let v = sender.representedObject as? String ?? ""
+        filterModifiedDays = Int(v)
+        timeFilter.item(at: 0)?.title = v.isEmpty ? "修改时间" : sender.title
+        runSearch()
+    }
+
+    @objc private func sizeFilterChanged(_ sender: NSMenuItem) {
+        let v = sender.representedObject as? String ?? ""
+        filterMinSize = nil
+        filterMaxSize = nil
+        if v == "0-1" { filterMaxSize = 1_000_000 }
+        else if v == "1-10" { filterMinSize = 1_000_000; filterMaxSize = 10_000_000 }
+        else if v == "10-100" { filterMinSize = 10_000_000; filterMaxSize = 100_000_000 }
+        else if v == "100-" { filterMinSize = 100_000_000 }
+        sizeFilter.item(at: 0)?.title = v.isEmpty ? "大小" : sender.title
+        runSearch()
+    }
+
+    @objc private func locFilterChanged(_ sender: NSMenuItem) {
+        let v = sender.representedObject as? String ?? ""
+        selectedLocationPath = v.isEmpty ? nil : v
+        locFilter.item(at: 0)?.title = v.isEmpty ? "位置" : sender.title
+        rebuildLocationSidebar()
+        runSearch()
+    }
+
+    @objc private func sortChanged(_ sender: NSMenuItem) {
+        let t = sender.title
+        if let k = IndexEngine.SortKey(rawValue: t) {
+            currentSort = k
+            sortPopup.item(at: 0)?.title = t
+            runSearch()
+        }
+    }
+
+    @objc private func clearQuery() {
+        queryField.stringValue = ""
+        runSearch()
+        window?.makeFirstResponder(queryField)
+    }
+
+    @objc private func showList() { isListView = true; updateViewToggle(); tableView.rowHeight = 56; tableView.reloadData() }
+    @objc private func showGrid() { isListView = false; updateViewToggle(); tableView.rowHeight = 88; tableView.reloadData() }
+
+    private func updateViewToggle() {
+        listViewBtn.contentTintColor = isListView ? Theme.accent : Theme.secondaryText
+        gridViewBtn.contentTintColor = !isListView ? Theme.accent : Theme.secondaryText
+    }
+
+    @objc func openSettings() { settingsWC.present() }
+
+    private func addLocation() {
+        let p = NSOpenPanel()
+        p.canChooseFiles = false
+        p.canChooseDirectories = true
+        p.allowsMultipleSelection = false
+        p.prompt = "添加"
+        p.message = "选择要纳入索引的文件夹"
+        p.begin { [weak self] r in
+            guard r == .OK, let url = p.url else { return }
+            IndexEngine.shared.addRoot(url)
+            self?.rebuildLocationSidebar()
         }
     }
 
@@ -491,18 +765,16 @@ final class SearchWindowController: NSWindowController, NSWindowDelegate, NSTabl
     func numberOfRows(in tableView: NSTableView) -> Int { hits.count }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        let id = NSUserInterfaceItemIdentifier("cell")
-        let cell = (tableView.makeView(withIdentifier: id, owner: nil) as? ResultCell) ?? ResultCell()
+        let id = NSUserInterfaceItemIdentifier(isListView ? "list" : "grid")
+        let cell = (tableView.makeView(withIdentifier: id, owner: nil) as? ResultRowView) ?? ResultRowView(style: isListView ? .list : .grid)
         cell.identifier = id
-        if row < hits.count { cell.configure(hits[row], sort: currentSort) }
+        if row < hits.count { cell.configure(hits[row]) }
         return cell
     }
 
-    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
-        SoftRowView()
-    }
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? { SoftRowView() }
 
-    // MARK: - Context menu
+    // MARK: - Menu / actions
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
@@ -510,217 +782,258 @@ final class SearchWindowController: NSWindowController, NSWindowDelegate, NSTabl
         contextRow = row
         guard row >= 0, row < hits.count else { return }
         tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-
-        let items: [(String, Selector)] = [
+        for (t, sel) in [
             ("打开", #selector(ctxOpen)),
             ("在访达中显示", #selector(ctxReveal)),
-            ("定位到所在文件夹", #selector(ctxOpenParent)),
+            ("定位到所在文件夹", #selector(ctxParent)),
             ("—", #selector(ctxOpen)),
-            ("复制文件路径", #selector(ctxCopyPath)),
-            ("复制文件夹路径", #selector(ctxCopyFolder)),
-        ]
-        for (t, sel) in items {
-            if t == "—" {
-                menu.addItem(.separator())
-                continue
-            }
+            ("复制路径", #selector(ctxCopy)),
+        ] as [(String, Selector)] {
+            if t == "—" { menu.addItem(.separator()); continue }
             let it = NSMenuItem(title: t, action: sel, keyEquivalent: "")
             it.target = self
-            it.attributedTitle = NSAttributedString(string: t, attributes: [.font: Theme.songBold(13)])
             menu.addItem(it)
         }
     }
 
-    @objc private func ctxOpen() { openHit(at: contextRow) }
-    @objc private func ctxReveal() { revealHit(at: contextRow) }
-    @objc private func ctxOpenParent() { openParentFolder(at: contextRow) }
-    @objc private func ctxCopyPath() { copyPath(at: contextRow) }
-    @objc private func ctxCopyFolder() { copyFolderPath(at: contextRow) }
-    @objc private func openSelected() { openHit(at: tableView.selectedRow) }
+    @objc private func ctxOpen() { open(at: contextRow) }
+    @objc private func ctxReveal() { reveal(at: contextRow) }
+    @objc private func ctxParent() { reveal(at: contextRow) }
+    @objc private func ctxCopy() {
+        guard contextRow >= 0, contextRow < hits.count else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(hits[contextRow].path, forType: .string)
+    }
+    @objc private func openSelected() { open(at: tableView.selectedRow) }
 
-    private func openHit(at row: Int) {
+    private func open(at row: Int) {
         guard row >= 0, row < hits.count else { return }
         NSWorkspace.shared.open(URL(fileURLWithPath: hits[row].path))
     }
-
-    private func revealHit(at row: Int) {
+    private func reveal(at row: Int) {
         guard row >= 0, row < hits.count else { return }
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: hits[row].path)])
     }
 
-    private func openParentFolder(at row: Int) {
-        guard row >= 0, row < hits.count else { return }
-        let hit = hits[row]
-        if hit.isDirectory {
-            NSWorkspace.shared.open(URL(fileURLWithPath: hit.path, isDirectory: true))
-        } else {
-            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: hit.path)])
-        }
-    }
-
-    private func copyPath(at row: Int) {
-        guard row >= 0, row < hits.count else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(hits[row].path, forType: .string)
-    }
-
-    private func copyFolderPath(at row: Int) {
-        guard row >= 0, row < hits.count else { return }
-        let hit = hits[row]
-        let folder = hit.isDirectory ? hit.path : hit.parentPath
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(folder, forType: .string)
-    }
-
-    private func handleKey(_ event: NSEvent) -> NSEvent? {
-        guard window?.isKeyWindow == true else { return event }
-        // 设置面板录制时不抢键
-        if settingsWC.window?.isVisible == true { return event }
-        switch event.keyCode {
-        case 53:
-            dismissAnimated()
-            return nil
+    private func handleKey(_ e: NSEvent) -> NSEvent? {
+        guard window?.isKeyWindow == true else { return e }
+        if settingsWC.window?.isVisible == true { return e }
+        switch e.keyCode {
+        case 53: dismissAnimated(); return nil
         case 36, 76:
-            if event.modifierFlags.contains(.command) {
-                revealHit(at: tableView.selectedRow)
-            } else if event.modifierFlags.contains(.option) {
-                openParentFolder(at: tableView.selectedRow)
-            } else {
-                openHit(at: tableView.selectedRow)
+            if e.modifierFlags.contains(.command) { reveal(at: tableView.selectedRow) }
+            else { open(at: tableView.selectedRow) }
+            return nil
+        case 125: move(1); return nil
+        case 126: move(-1); return nil
+        case 8 where e.modifierFlags.contains(.command):
+            let r = tableView.selectedRow
+            if r >= 0, r < hits.count {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(hits[r].path, forType: .string)
             }
             return nil
-        case 125: moveSelection(1); return nil
-        case 126: moveSelection(-1); return nil
-        case 8 where event.modifierFlags.contains(.command):
-            copyPath(at: tableView.selectedRow)
-            return nil
-        default:
-            return event
+        default: return e
         }
     }
 
-    private func moveSelection(_ delta: Int) {
+    private func move(_ d: Int) {
         guard !hits.isEmpty else { return }
-        var row = tableView.selectedRow
-        if row < 0 { row = 0 }
-        row = max(0, min(hits.count - 1, row + delta))
-        tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-        tableView.scrollRowToVisible(row)
+        var r = max(0, tableView.selectedRow)
+        r = max(0, min(hits.count - 1, r + d))
+        tableView.selectRowIndexes(IndexSet(integer: r), byExtendingSelection: false)
+        tableView.scrollRowToVisible(r)
     }
 
-    func windowDidBecomeKey(_ notification: Notification) {
-        window?.makeFirstResponder(queryField)
-    }
-
-    func controlTextDidChange(_ obj: Notification) {
-        runSearch()
-    }
+    func controlTextDidChange(_ obj: Notification) { runSearch() }
+    func windowDidBecomeKey(_ notification: Notification) { window?.makeFirstResponder(queryField) }
 }
 
-// MARK: - Panel
+// MARK: - Sidebar row
 
-private final class KeyablePanel: NSPanel {
-    override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { true }
-}
+private final class SidebarRowButton: NSView {
+    var onTap: (() -> Void)?
+    var isSelected = false { didSet { needsDisplay = true; apply() } }
+    var isAddStyle = false
+    private let icon = NSImageView()
+    private let label = NSTextField(labelWithString: "")
+    private let badge = NSTextField(labelWithString: "")
 
-private final class SoftRowView: NSTableRowView {
-    override func drawSelection(in dirtyRect: NSRect) {
-        guard selectionHighlightStyle != .none else { return }
-        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 6, dy: 1), xRadius: 10, yRadius: 10)
-        Theme.accent.withAlphaComponent(isEmphasized ? 0.16 : 0.10).setFill()
-        path.fill()
+    init(title: String, symbol: String, count: Int?) {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = 8
+        translatesAutoresizingMaskIntoConstraints = false
+        heightAnchor.constraint(equalToConstant: 32).isActive = true
+
+        icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        icon.image?.isTemplate = true
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        label.stringValue = title
+        label.font = Theme.ui(12.5)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        badge.font = Theme.ui(11)
+        badge.textColor = Theme.metaText
+        badge.alignment = .right
+        badge.translatesAutoresizingMaskIntoConstraints = false
+        if let count { badge.stringValue = "\(count)" } else { badge.stringValue = "" }
+
+        addSubview(icon)
+        addSubview(label)
+        addSubview(badge)
+        NSLayoutConstraint.activate([
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            icon.centerYAnchor.constraint(equalTo: centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: 14),
+            icon.heightAnchor.constraint(equalToConstant: 14),
+            label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 8),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+            badge.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            badge.centerYAnchor.constraint(equalTo: centerYAnchor),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: badge.leadingAnchor, constant: -4),
+        ])
+        apply()
     }
 
-    override var interiorBackgroundStyle: NSView.BackgroundStyle { .normal }
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func apply() {
+        if isSelected {
+            layer?.backgroundColor = Theme.accentSoft.cgColor
+            label.textColor = Theme.accent
+            icon.contentTintColor = Theme.accent
+            badge.textColor = Theme.accent
+        } else {
+            layer?.backgroundColor = NSColor.clear.cgColor
+            label.textColor = isAddStyle ? Theme.secondaryText : Theme.titleText
+            icon.contentTintColor = Theme.secondaryText
+            badge.textColor = Theme.metaText
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) { onTap?() }
+    override func draw(_ dirtyRect: NSRect) { /* layer backed */ }
 }
 
-private final class ResultCell: NSTableCellView {
+// MARK: - Result row
+
+private final class ResultRowView: NSTableCellView {
+    enum Style { case list, grid }
+    private let style: Style
     private let iconView = NSImageView()
     private let nameLabel = NSTextField(labelWithString: "")
     private let pathLabel = NSTextField(labelWithString: "")
-    private let metaLabel = NSTextField(labelWithString: "")
+    private let sizeLabel = NSTextField(labelWithString: "")
+    private let dateLabel = NSTextField(labelWithString: "")
 
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
+    init(style: Style) {
+        self.style = style
+        super.init(frame: .zero)
         iconView.translatesAutoresizingMaskIntoConstraints = false
         iconView.imageScaling = .scaleProportionallyUpOrDown
-
-        nameLabel.font = Theme.songBold(13.5)
+        nameLabel.font = Theme.ui(13.5, weight: .medium)
         nameLabel.lineBreakMode = .byTruncatingMiddle
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
-
-        pathLabel.font = Theme.songBold(11)
+        pathLabel.font = Theme.ui(11)
         pathLabel.textColor = Theme.secondaryText
         pathLabel.lineBreakMode = .byTruncatingMiddle
         pathLabel.translatesAutoresizingMaskIntoConstraints = false
-
-        metaLabel.font = Theme.songBold(10.5)
-        metaLabel.textColor = Theme.metaText
-        metaLabel.alignment = .right
-        metaLabel.translatesAutoresizingMaskIntoConstraints = false
+        sizeLabel.font = Theme.ui(11)
+        sizeLabel.textColor = Theme.secondaryText
+        sizeLabel.alignment = .right
+        sizeLabel.translatesAutoresizingMaskIntoConstraints = false
+        dateLabel.font = Theme.ui(11)
+        dateLabel.textColor = Theme.metaText
+        dateLabel.alignment = .right
+        dateLabel.translatesAutoresizingMaskIntoConstraints = false
 
         addSubview(iconView)
         addSubview(nameLabel)
         addSubview(pathLabel)
-        addSubview(metaLabel)
+        addSubview(sizeLabel)
+        addSubview(dateLabel)
 
+        let iconSize: CGFloat = style == .list ? 28 : 40
         NSLayoutConstraint.activate([
-            iconView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+            iconView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
             iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
-            iconView.widthAnchor.constraint(equalToConstant: 24),
-            iconView.heightAnchor.constraint(equalToConstant: 24),
+            iconView.widthAnchor.constraint(equalToConstant: iconSize),
+            iconView.heightAnchor.constraint(equalToConstant: iconSize),
 
-            metaLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
-            metaLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-            metaLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 150),
+            dateLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            dateLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+            dateLabel.widthAnchor.constraint(equalToConstant: 88),
 
-            nameLabel.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 10),
-            nameLabel.trailingAnchor.constraint(equalTo: metaLabel.leadingAnchor, constant: -10),
-            nameLabel.topAnchor.constraint(equalTo: topAnchor, constant: 6),
+            sizeLabel.trailingAnchor.constraint(equalTo: dateLabel.leadingAnchor, constant: -12),
+            sizeLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+            sizeLabel.widthAnchor.constraint(equalToConstant: 72),
+
+            nameLabel.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 12),
+            nameLabel.trailingAnchor.constraint(equalTo: sizeLabel.leadingAnchor, constant: -12),
+            nameLabel.topAnchor.constraint(equalTo: topAnchor, constant: style == .list ? 10 : 12),
 
             pathLabel.leadingAnchor.constraint(equalTo: nameLabel.leadingAnchor),
             pathLabel.trailingAnchor.constraint(equalTo: nameLabel.trailingAnchor),
-            pathLabel.topAnchor.constraint(equalTo: nameLabel.bottomAnchor, constant: 1),
+            pathLabel.topAnchor.constraint(equalTo: nameLabel.bottomAnchor, constant: 2),
         ])
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func configure(_ hit: IndexEngine.Hit, sort: IndexEngine.SortKey) {
+    func configure(_ hit: IndexEngine.Hit) {
         nameLabel.stringValue = hit.name
         var p = hit.path
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         if p.hasPrefix(home) { p = "~" + p.dropFirst(home.count) }
         pathLabel.stringValue = p
         iconView.image = NSWorkspace.shared.icon(forFile: hit.path)
-        metaLabel.stringValue = Self.metaText(for: hit, sort: sort)
+        if hit.isDirectory {
+            sizeLabel.stringValue = "—"
+        } else if hit.fileSize >= 0 {
+            sizeLabel.stringValue = Self.humanSize(hit.fileSize)
+        } else {
+            sizeLabel.stringValue = ""
+        }
+        dateLabel.stringValue = hit.modifiedAt.map { Self.fmtDate($0) } ?? ""
     }
 
-    private static let dateFmt: DateFormatter = {
+    private static let df: DateFormatter = {
         let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd HH:mm"
+        f.locale = Locale(identifier: "zh_CN")
         return f
     }()
 
-    private static func metaText(for hit: IndexEngine.Hit, sort: IndexEngine.SortKey) -> String {
-        switch sort {
-        case .type: return hit.typeKey
-        case .sizeAsc, .sizeDesc: return hit.fileSize >= 0 ? humanSize(hit.fileSize) : ""
-        case .createdAsc, .createdDesc:
-            return hit.createdAt.map { dateFmt.string(from: $0) } ?? ""
-        case .modifiedAsc, .modifiedDesc:
-            return hit.modifiedAt.map { dateFmt.string(from: $0) } ?? ""
-        default:
-            return hit.isDirectory ? "文件夹" : (hit.fileExtension.isEmpty ? "" : ".\(hit.fileExtension)")
+    private static func fmtDate(_ d: Date) -> String {
+        let cal = Calendar.current
+        if cal.isDateInToday(d) {
+            df.dateFormat = "今天 HH:mm"
+        } else if cal.isDateInYesterday(d) {
+            df.dateFormat = "昨天 HH:mm"
+        } else {
+            df.dateFormat = "yyyy/MM/dd"
         }
+        return df.string(from: d)
     }
 
     private static func humanSize(_ n: Int64) -> String {
-        let units = ["B", "KB", "MB", "GB", "TB"]
-        var size = Double(n)
-        var i = 0
-        while size >= 1024 && i < units.count - 1 { size /= 1024; i += 1 }
-        return i == 0 ? "\(Int(size)) B" : String(format: "%.1f %@", size, units[i])
+        let u = ["B", "KB", "MB", "GB"]
+        var s = Double(n), i = 0
+        while s >= 1024 && i < u.count - 1 { s /= 1024; i += 1 }
+        return i == 0 ? "\(Int(s)) B" : String(format: "%.1f %@", s, u[i])
     }
+}
+
+private final class SoftRowView: NSTableRowView {
+    override func drawSelection(in dirtyRect: NSRect) {
+        guard selectionHighlightStyle != .none else { return }
+        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 8, dy: 2), xRadius: 10, yRadius: 10)
+        Theme.accentSoft.setFill()
+        path.fill()
+    }
+    override var interiorBackgroundStyle: NSView.BackgroundStyle { .normal }
+}
+
+private final class KeyablePanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
 }

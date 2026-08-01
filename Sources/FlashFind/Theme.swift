@@ -1,50 +1,64 @@
 import AppKit
 
-/// 极简主题：无资源文件、纯代码绘制，零额外内存占用
+/// 设计稿风格：浅色、蓝色强调，纯代码无资源
 enum Theme {
-    // 宋体加粗 — 系统 Songti SC Bold
     static func songBold(_ size: CGFloat) -> NSFont {
         if let f = NSFont(name: "STSongti-SC-Bold", size: size) { return f }
         if let f = NSFont(name: "Songti SC Bold", size: size) { return f }
-        if let f = NSFont(name: "SongtiSC-Bold", size: size) { return f }
         return NSFont.systemFont(ofSize: size, weight: .semibold)
     }
 
     static func songRegular(_ size: CGFloat) -> NSFont {
         if let f = NSFont(name: "STSongti-SC-Regular", size: size) { return f }
-        if let f = NSFont(name: "Songti SC", size: size) { return f }
         return NSFont.systemFont(ofSize: size)
     }
 
-    /// 高级感暗色强调（适配浅色/深色）
+    /// UI 用系统字体更接近设计稿（数字/标签清晰）
+    static func ui(_ size: CGFloat, weight: NSFont.Weight = .regular) -> NSFont {
+        NSFont.systemFont(ofSize: size, weight: weight)
+    }
+
     static var accent: NSColor {
-        NSColor(name: nil) { appearance in
-            let dark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            if dark {
-                return NSColor(calibratedRed: 0.72, green: 0.78, blue: 1.0, alpha: 1)
-            }
-            return NSColor(calibratedRed: 0.22, green: 0.28, blue: 0.55, alpha: 1)
+        NSColor(calibratedRed: 0.25, green: 0.47, blue: 0.98, alpha: 1) // #4078FA 附近
+    }
+
+    static var accentSoft: NSColor {
+        accent.withAlphaComponent(0.12)
+    }
+
+    static var sidebarBg: NSColor {
+        NSColor(name: nil) { a in
+            a.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                ? NSColor(calibratedWhite: 0.14, alpha: 1)
+                : NSColor(calibratedWhite: 0.965, alpha: 1)
+        }
+    }
+
+    static var contentBg: NSColor {
+        NSColor(name: nil) { a in
+            a.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                ? NSColor(calibratedWhite: 0.11, alpha: 1)
+                : NSColor.white
         }
     }
 
     static var subtleBorder: NSColor {
-        NSColor(name: nil) { appearance in
-            let dark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            return dark
-                ? NSColor.white.withAlphaComponent(0.10)
-                : NSColor.black.withAlphaComponent(0.08)
+        NSColor(name: nil) { a in
+            a.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                ? NSColor.white.withAlphaComponent(0.08)
+                : NSColor.black.withAlphaComponent(0.06)
         }
     }
 
-    static var cardFill: NSColor {
-        NSColor(name: nil) { appearance in
-            let dark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            return dark
-                ? NSColor.white.withAlphaComponent(0.04)
-                : NSColor.white.withAlphaComponent(0.55)
+    static var chipBg: NSColor {
+        NSColor(name: nil) { a in
+            a.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                ? NSColor.white.withAlphaComponent(0.06)
+                : NSColor(calibratedWhite: 0.96, alpha: 1)
         }
     }
 
-    static var metaText: NSColor { .tertiaryLabelColor }
     static var secondaryText: NSColor { .secondaryLabelColor }
+    static var metaText: NSColor { .tertiaryLabelColor }
+    static var titleText: NSColor { .labelColor }
 }

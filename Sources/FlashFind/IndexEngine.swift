@@ -4,6 +4,24 @@ import Foundation
 final class IndexEngine: @unchecked Sendable {
     static let shared = IndexEngine()
 
+    enum Category: String, CaseIterable, Sendable {
+        case all = "全部结果"
+        case file = "文件"
+        case folder = "文件夹"
+        case app = "应用"
+        case other = "其他"
+
+        var symbol: String {
+            switch self {
+            case .all: return "magnifyingglass"
+            case .file: return "doc"
+            case .folder: return "folder"
+            case .app: return "app"
+            case .other: return "ellipsis.rectangle"
+            }
+        }
+    }
+
     struct Hit: Sendable {
         let name: String
         let path: String
@@ -25,10 +43,38 @@ final class IndexEngine: @unchecked Sendable {
             let ext = fileExtension
             return ext.isEmpty ? "文件" : ext
         }
+
+        var category: Category {
+            if isDirectory {
+                if name.hasSuffix(".app") || path.contains("/Applications/") { return .app }
+                return .folder
+            }
+            if name.hasSuffix(".app") || path.hasPrefix("/Applications/") || path.contains("/Applications/") {
+                return .app
+            }
+            if !fileExtension.isEmpty { return .file }
+            return .other
+        }
+    }
+
+    /// 搜索过滤（侧边栏 + 顶栏筛选项）
+    struct SearchOptions: Sendable {
+        var category: Category = .all
+        /// 路径前缀，nil = 全部位置
+        var locationPrefix: String? = nil
+        /// 扩展名过滤（小写，无点），nil = 不限
+        var fileExtension: String? = nil
+        var minSize: Int64? = nil
+        var maxSize: Int64? = nil
+        var modifiedAfter: Date? = nil
+        var sort: SortKey = .relevance
+        var limit: Int = 200
+        /// UI 需要始终显示大小/时间
+        var alwaysEnrich: Bool = true
     }
 
     enum SortKey: String, CaseIterable, Sendable {
-        case relevance = "相关度"
+        case relevance = "相关性"
         case nameAsc = "名称 A→Z"
         case nameDesc = "名称 Z→A"
         case type = "类型"
@@ -39,6 +85,12 @@ final class IndexEngine: @unchecked Sendable {
         case modifiedDesc = "修改时间 新→旧"
         case modifiedAsc = "修改时间 旧→新"
         case path = "路径"
+    }
+
+    /// 侧边栏展示用
+    struct LocationItem: Sendable {
+        let title: String
+        let path: String
     }
 
     /// 跳过的目录名（小写比较）
@@ -81,11 +133,41 @@ final class IndexEngine: @unchecked Sendable {
 
     // MARK: - Public
 
+    /// 当前索引根路径（侧边栏「位置」）
+    func indexedLocations() -> [LocationItem] {
+        queue.sync {
+            roots.map { url in
+                let title: String
+                switch url.lastPathComponent {
+                case "Desktop": title = "桌面"
+                case "Documents": title = "文档"
+                case "Downloads": title = "下载"
+                case "Applications": title = "应用"
+                case "Movies": title = "影片"
+                case "Music": title = "音乐"
+                case "Pictures": title = "图片"
+                default:
+                    title = url.path == "/" ? "Macintosh HD" : url.lastPathComponent
+                }
+                return LocationItem(title: title, path: url.path)
+            }
+        }
+    }
+
+    func addRoot(_ url: URL) {
+        queue.sync {
+            let path = url.standardizedFileURL.path
+            if !roots.contains(where: { $0.path == path }) {
+                roots.append(url.standardizedFileURL)
+            }
+        }
+        rebuildAsync(reason: "添加位置")
+    }
+
     func configureDefaultRoots() {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let fm = FileManager.default
         // 不扫整个 ~（含 Library / 云盘，会极慢且占内存）
-        // 默认覆盖高频目录，接近 Everything 日常用法
         let candidates = [
             home.appendingPathComponent("Desktop"),
             home.appendingPathComponent("Documents"),
@@ -95,9 +177,13 @@ final class IndexEngine: @unchecked Sendable {
             home.appendingPathComponent("Pictures"),
             home.appendingPathComponent("Applications"),
             URL(fileURLWithPath: "/Applications"),
+            URL(fileURLWithPath: "/"),
         ]
-        roots = candidates.filter { fm.fileExists(atPath: $0.path) }
-        // 若关键目录都不存在，退回 home 但会在遍历时跳过 Library
+        // 「/」仅作位置筛选入口，不深度遍历整盘
+        roots = candidates.filter { url in
+            if url.path == "/" { return true }
+            return fm.fileExists(atPath: url.path)
+        }
         if roots.isEmpty {
             roots = [home]
         }
@@ -123,22 +209,21 @@ final class IndexEngine: @unchecked Sendable {
         }
     }
 
-    /// 毫秒级搜索：只匹配文件名（Everything 风格）
-    /// - Parameters:
-    ///   - sort: 排序维度；非相关度时会对结果补全大小/时间元数据
-    ///   - limit: 返回条数上限
+    /// 毫秒级搜索：文件名匹配 + 分类/位置过滤
     func search(
         query: String,
-        sort: SortKey = .relevance,
-        limit: Int = 200
-    ) -> (hits: [Hit], elapsedMs: Double) {
+        options: SearchOptions = SearchOptions()
+    ) -> (hits: [Hit], counts: [Category: Int], elapsedMs: Double) {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        if q.isEmpty { return ([], 0) }
+        if q.isEmpty {
+            return ([], Dictionary(uniqueKeysWithValues: Category.allCases.map { ($0, 0) }), 0)
+        }
 
         let t0 = CFAbsoluteTimeGetCurrent()
         let needle = q.lowercased()
+        let limit = options.limit
+        let locPrefix = options.locationPrefix
 
-        // 快照（Array CoW，queue 内拷贝引用）
         var snapshotNames: [String] = []
         var snapshotLower: [String] = []
         var snapshotDirIds: [UInt32] = []
@@ -152,10 +237,11 @@ final class IndexEngine: @unchecked Sendable {
             snapshotDirs = self.dirs
         }
         let count = snapshotLower.count
-        if count == 0 { return ([], 0) }
+        if count == 0 {
+            return ([], Dictionary(uniqueKeysWithValues: Category.allCases.map { ($0, 0) }), 0)
+        }
 
-        // 并行分片；多取一些候选再排序截断
-        let candidateCap = max(limit * 4, 400)
+        let candidateCap = max(limit * 6, 600)
         let chunks = ProcessInfo.processInfo.activeProcessorCount
         let slice = max(1, (count + chunks - 1) / chunks)
         var partial: [[Int]] = Array(repeating: [], count: chunks)
@@ -170,7 +256,7 @@ final class IndexEngine: @unchecked Sendable {
             for i in start..<end {
                 if snapshotLower[i].contains(needle) {
                     local.append(i)
-                    if local.count >= candidateCap / max(chunks, 1) + 32 { break }
+                    if local.count >= candidateCap / max(chunks, 1) + 48 { break }
                 }
             }
             lock.lock()
@@ -184,58 +270,78 @@ final class IndexEngine: @unchecked Sendable {
             indices.append(contentsOf: p)
             if indices.count >= candidateCap { break }
         }
-        if indices.count > candidateCap {
-            indices = Array(indices.prefix(candidateCap))
-        }
 
-        // 相关度预排序（无论最终 sort 为何，先收窄）
-        indices.sort { a, b in
-            let la = snapshotLower[a]
-            let lb = snapshotLower[b]
-            let pa = la.hasPrefix(needle)
-            let pb = lb.hasPrefix(needle)
-            if pa != pb { return pa && !pb }
-            if la.count != lb.count { return la.count < lb.count }
-            return la < lb
-        }
-        if indices.count > limit {
-            indices = Array(indices.prefix(limit))
-        }
-
-        var hits: [Hit] = []
-        hits.reserveCapacity(indices.count)
+        // 先构 hits 再过滤分类（便于统计侧边栏计数）
+        var allHits: [Hit] = []
+        allHits.reserveCapacity(indices.count)
         for i in indices {
             let dirId = Int(snapshotDirIds[i])
             guard dirId < snapshotDirs.count else { continue }
             let dir = snapshotDirs[dirId]
             let name = snapshotNames[i]
             let path = dir == "/" ? "/\(name)" : "\(dir)/\(name)"
+            if let locPrefix, !path.hasPrefix(locPrefix) { continue }
             let isDir = snapshotIsDirs[i]
-            let ext: String
-            if isDir {
-                ext = ""
-            } else {
-                ext = (name as NSString).pathExtension.lowercased()
-            }
-            let hit = Hit(
+            let ext = isDir ? "" : (name as NSString).pathExtension.lowercased()
+            if let want = options.fileExtension, ext != want { continue }
+            allHits.append(Hit(
                 name: name,
                 path: path,
                 isDirectory: isDir,
                 fileExtension: ext,
                 isPrefixMatch: snapshotLower[i].hasPrefix(needle)
-            )
-            hits.append(hit)
+            ))
         }
 
-        // 按需补全元数据（仅结果集，通常 <200 条，很快）
-        if sort.needsMetadata {
+        // 分类计数（过滤后）
+        var counts: [Category: Int] = [.all: allHits.count, .file: 0, .folder: 0, .app: 0, .other: 0]
+        for h in allHits {
+            counts[h.category, default: 0] += 1
+        }
+
+        var hits = allHits
+        if options.category != .all {
+            hits = hits.filter { $0.category == options.category }
+        }
+
+        // 相关度预排后截断
+        hits.sort { a, b in
+            if a.isPrefixMatch != b.isPrefixMatch { return a.isPrefixMatch && !b.isPrefixMatch }
+            if a.name.count != b.name.count { return a.name.count < b.name.count }
+            return a.name.localizedStandardCompare(b.name) == .orderedAscending
+        }
+        if hits.count > limit {
+            hits = Array(hits.prefix(limit))
+        }
+
+        if options.alwaysEnrich || options.sort.needsMetadata || options.minSize != nil || options.maxSize != nil || options.modifiedAfter != nil {
             enrichMetadata(&hits)
         }
 
-        hits = Self.sortHits(hits, by: sort, needle: needle)
+        // 大小 / 时间过滤（依赖元数据）
+        if let minS = options.minSize {
+            hits = hits.filter { $0.fileSize >= minS }
+        }
+        if let maxS = options.maxSize {
+            hits = hits.filter { $0.fileSize >= 0 && $0.fileSize <= maxS }
+        }
+        if let after = options.modifiedAfter {
+            hits = hits.filter { ($0.modifiedAt ?? .distantPast) >= after }
+        }
+
+        hits = Self.sortHits(hits, by: options.sort, needle: needle)
 
         let ms = (CFAbsoluteTimeGetCurrent() - t0) * 1000
-        return (hits, ms)
+        return (hits, counts, ms)
+    }
+
+    /// 兼容旧调用
+    func search(query: String, sort: SortKey = .relevance, limit: Int = 200) -> (hits: [Hit], elapsedMs: Double) {
+        var opt = SearchOptions()
+        opt.sort = sort
+        opt.limit = limit
+        let r = search(query: query, options: opt)
+        return (r.hits, r.elapsedMs)
     }
 
     /// 为结果集填充大小 / 创建 / 修改时间
@@ -371,11 +477,12 @@ final class IndexEngine: @unchecked Sendable {
 
         for root in roots {
             let rootPath = root.path
-            guard let attrs = try? fm.attributesOfItem(atPath: rootPath) else { continue }
-            // 跳过网络卷
-            if let fsType = attrs[.type] as? FileAttributeType, fsType == .typeSymbolicLink {
-                // 允许符号链接根，但不深追远端
+            // 根路径「/」仅作位置标签，不整盘遍历
+            if rootPath == "/" {
+                log("skip deep scan for /")
+                continue
             }
+            guard fm.fileExists(atPath: rootPath) else { continue }
             log("scan root: \(rootPath)")
             postStatus("扫描 \(root.lastPathComponent)…")
 
@@ -387,14 +494,13 @@ final class IndexEngine: @unchecked Sendable {
             newDirIds.append(rid)
             newIsDirs.append(true)
 
-            // 用 resourceValues 预取，skipsPackageDescendants 避免进 .app
             guard let enumerator = fm.enumerator(
                 at: root,
                 includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey, .isRegularFileKey],
                 options: [.skipsPackageDescendants, .skipsHiddenFiles],
                 errorHandler: { url, err in
                     self.log("skip \(url.path): \(err.localizedDescription)")
-                    return true // 继续
+                    return true
                 }
             ) else { continue }
 
