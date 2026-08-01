@@ -29,14 +29,17 @@ final class SearchWindowController: NSWindowController, NSWindowDelegate, NSTabl
     private let brandLabel = NSTextField(labelWithString: "FlashFind")
     private let categoryStack = NSStackView()
     private let locationStack = NSStackView()
+    private let locationScroll = NSScrollView()
+    private let locTitle = NSTextField(labelWithString: "")
     private let sidebarSettingsBtn = NSButton()
     private var categoryButtons: [IndexEngine.Category: SidebarRowButton] = [:]
     private var locationButtons: [String: SidebarRowButton] = [:] // path -> btn, "" = all
 
     // Main
-    private let headline = NSTextField(labelWithString: "搜索文件，快如闪电")
-    private let subhead = NSTextField(labelWithString: "输入关键词，立即找到你需要的文件")
-    private let hotkeyBadge = NSTextField(labelWithString: "")
+    private let headline = NSTextField(labelWithString: "")
+    private let subhead = NSTextField(labelWithString: "")
+    private let hotkeyBadge = NSView()
+    private let hotkeyBadgeLabel = NSTextField(labelWithString: "")
     private let searchCard = NSView()
     private let searchIcon = NSImageView()
     private let queryField = CenteredTextField()
@@ -49,10 +52,15 @@ final class SearchWindowController: NSWindowController, NSWindowDelegate, NSTabl
     private let sortPopup = NSPopUpButton(frame: .zero, pullsDown: true)
     private let listViewBtn = NSButton()
     private let gridViewBtn = NSButton()
+    private let contentSearchPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let scrollView = NSScrollView()
     private let tableView = NSTableView()
     private let footerLabel = NSTextField(labelWithString: "")
-    private let footerHints = NSTextField(labelWithString: "↑↓ 选择    ↩ 打开    ⌘↩ 在访达中显示")
+    private let footerHints = NSTextField(labelWithString: "")
+    private let searchSpinner = NSProgressIndicator()
+    /// 是否正在搜索（用于底部状态与转圈）
+    private var isSearching = false
+    private var searchingIsContent = false
 
     private lazy var settingsWC = SettingsWindowController()
     var hotKeyHandler: ((HotKeyConfig) -> Void)?
@@ -123,15 +131,38 @@ final class SearchWindowController: NSWindowController, NSWindowDelegate, NSTabl
         categoryStack.translatesAutoresizingMaskIntoConstraints = false
         sidebar.addSubview(categoryStack)
 
-        let locTitle = makeSectionLabel("位置")
+        locTitle.font = Theme.songBold(11)
+        locTitle.textColor = Theme.metaText
+        locTitle.isBezeled = false
+        locTitle.drawsBackground = false
+        locTitle.isEditable = false
         locTitle.translatesAutoresizingMaskIntoConstraints = false
         sidebar.addSubview(locTitle)
 
+        // 位置列表可滚动，避免与左下角设置按钮重叠
         locationStack.orientation = .vertical
         locationStack.alignment = .leading
         locationStack.spacing = 2
         locationStack.translatesAutoresizingMaskIntoConstraints = false
-        sidebar.addSubview(locationStack)
+        locationStack.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 4, right: 0)
+
+        locationScroll.drawsBackground = false
+        locationScroll.backgroundColor = .clear
+        locationScroll.borderType = .noBorder
+        locationScroll.hasVerticalScroller = true
+        locationScroll.scrollerStyle = .overlay
+        locationScroll.autohidesScrollers = true
+        locationScroll.translatesAutoresizingMaskIntoConstraints = false
+        sidebar.addSubview(locationScroll)
+        locationScroll.documentView = locationStack
+        // 宽度贴合滚动区域，高度由 stack 内容撑开以便滚动
+        NSLayoutConstraint.activate([
+            locationStack.topAnchor.constraint(equalTo: locationScroll.contentView.topAnchor),
+            locationStack.leadingAnchor.constraint(equalTo: locationScroll.contentView.leadingAnchor),
+            locationStack.trailingAnchor.constraint(equalTo: locationScroll.contentView.trailingAnchor),
+            locationStack.bottomAnchor.constraint(equalTo: locationScroll.contentView.bottomAnchor),
+            locationStack.widthAnchor.constraint(equalTo: locationScroll.contentView.widthAnchor),
+        ])
 
         sidebarSettingsBtn.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: "设置")
         sidebarSettingsBtn.image?.isTemplate = true
@@ -154,17 +185,23 @@ final class SearchWindowController: NSWindowController, NSWindowDelegate, NSTabl
         subhead.font = Theme.songBold(12.5)
         subhead.textColor = Theme.secondaryText
         subhead.translatesAutoresizingMaskIntoConstraints = false
-        hotkeyBadge.font = Theme.songBold(11)
-        hotkeyBadge.textColor = Theme.secondaryText
-        hotkeyBadge.alignment = .center
+        // 快捷键徽章：容器 + 居中标签
         hotkeyBadge.wantsLayer = true
         hotkeyBadge.layer?.cornerRadius = 8
         hotkeyBadge.layer?.backgroundColor = Theme.chipBg.cgColor
         hotkeyBadge.translatesAutoresizingMaskIntoConstraints = false
+        hotkeyBadgeLabel.font = Theme.songBold(11)
+        hotkeyBadgeLabel.textColor = Theme.secondaryText
+        hotkeyBadgeLabel.alignment = .center
+        hotkeyBadgeLabel.isBezeled = false
+        hotkeyBadgeLabel.drawsBackground = false
+        hotkeyBadgeLabel.isEditable = false
+        hotkeyBadgeLabel.translatesAutoresizingMaskIntoConstraints = false
+        hotkeyBadge.addSubview(hotkeyBadgeLabel)
 
         mainPane.addSubview(headline)
         mainPane.addSubview(subhead)
-        mainPane.addSubview(hotkeyBadge)
+        // hotkey 放到右下角，与 footer 同行
 
         // 搜索框
         searchCard.wantsLayer = true
@@ -199,8 +236,14 @@ final class SearchWindowController: NSWindowController, NSWindowDelegate, NSTabl
         clearBtn.action = #selector(clearQuery)
         clearBtn.isHidden = true
         clearBtn.translatesAutoresizingMaskIntoConstraints = false
+        searchSpinner.style = .spinning
+        searchSpinner.controlSize = .small
+        searchSpinner.isDisplayedWhenStopped = false
+        searchSpinner.isHidden = true
+        searchSpinner.translatesAutoresizingMaskIntoConstraints = false
         searchCard.addSubview(searchIcon)
         searchCard.addSubview(queryField)
+        searchCard.addSubview(searchSpinner)
         searchCard.addSubview(clearBtn)
 
         // 过滤条
@@ -252,6 +295,16 @@ final class SearchWindowController: NSWindowController, NSWindowDelegate, NSTabl
         styleChipPopup(sortPopup)
         filterStack.addArrangedSubview(sortPopup)
 
+        // 搜索范围：仅文件名 / 可根据正文内容
+        contentSearchPopup.target = self
+        contentSearchPopup.action = #selector(contentSearchModeChanged(_:))
+        contentSearchPopup.setContentHuggingPriority(.required, for: .horizontal)
+        contentSearchPopup.font = Theme.songBold(12)
+        styleChipPopup(contentSearchPopup)
+        contentSearchPopup.widthAnchor.constraint(greaterThanOrEqualToConstant: 130).isActive = true
+        filterStack.addArrangedSubview(contentSearchPopup)
+        rebuildContentSearchPopup()
+
         listViewBtn.image = NSImage(systemSymbolName: "list.bullet", accessibilityDescription: "列表")
         gridViewBtn.image = NSImage(systemSymbolName: "square.grid.2x2", accessibilityDescription: "网格")
         for b in [listViewBtn, gridViewBtn] {
@@ -301,6 +354,7 @@ final class SearchWindowController: NSWindowController, NSWindowDelegate, NSTabl
         footerHints.translatesAutoresizingMaskIntoConstraints = false
         mainPane.addSubview(footerLabel)
         mainPane.addSubview(footerHints)
+        mainPane.addSubview(hotkeyBadge)
 
         NSLayoutConstraint.activate([
             rootView.leadingAnchor.constraint(equalTo: content.leadingAnchor),
@@ -332,9 +386,11 @@ final class SearchWindowController: NSWindowController, NSWindowDelegate, NSTabl
             locTitle.topAnchor.constraint(equalTo: categoryStack.bottomAnchor, constant: 18),
             locTitle.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 18),
 
-            locationStack.topAnchor.constraint(equalTo: locTitle.bottomAnchor, constant: 6),
-            locationStack.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 10),
-            locationStack.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -10),
+            // 位置区域：可滚动，底部止于设置按钮上方
+            locationScroll.topAnchor.constraint(equalTo: locTitle.bottomAnchor, constant: 6),
+            locationScroll.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 10),
+            locationScroll.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -10),
+            locationScroll.bottomAnchor.constraint(equalTo: sidebarSettingsBtn.topAnchor, constant: -12),
 
             sidebarSettingsBtn.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 16),
             sidebarSettingsBtn.bottomAnchor.constraint(equalTo: sidebar.bottomAnchor, constant: -14),
@@ -348,12 +404,10 @@ final class SearchWindowController: NSWindowController, NSWindowDelegate, NSTabl
 
             headline.topAnchor.constraint(equalTo: mainPane.topAnchor, constant: 28),
             headline.leadingAnchor.constraint(equalTo: mainPane.leadingAnchor, constant: 28),
+            headline.trailingAnchor.constraint(lessThanOrEqualTo: mainPane.trailingAnchor, constant: -28),
             subhead.topAnchor.constraint(equalTo: headline.bottomAnchor, constant: 4),
             subhead.leadingAnchor.constraint(equalTo: headline.leadingAnchor),
-            hotkeyBadge.centerYAnchor.constraint(equalTo: headline.centerYAnchor),
-            hotkeyBadge.trailingAnchor.constraint(equalTo: mainPane.trailingAnchor, constant: -28),
-            hotkeyBadge.widthAnchor.constraint(greaterThanOrEqualToConstant: 52),
-            hotkeyBadge.heightAnchor.constraint(equalToConstant: 26),
+            subhead.trailingAnchor.constraint(lessThanOrEqualTo: mainPane.trailingAnchor, constant: -28),
 
             searchCard.topAnchor.constraint(equalTo: subhead.bottomAnchor, constant: 18),
             searchCard.leadingAnchor.constraint(equalTo: mainPane.leadingAnchor, constant: 28),
@@ -368,8 +422,12 @@ final class SearchWindowController: NSWindowController, NSWindowDelegate, NSTabl
             clearBtn.centerYAnchor.constraint(equalTo: searchCard.centerYAnchor),
             clearBtn.widthAnchor.constraint(equalToConstant: 20),
             clearBtn.heightAnchor.constraint(equalToConstant: 20),
+            searchSpinner.trailingAnchor.constraint(equalTo: clearBtn.leadingAnchor, constant: -6),
+            searchSpinner.centerYAnchor.constraint(equalTo: searchCard.centerYAnchor),
+            searchSpinner.widthAnchor.constraint(equalToConstant: 16),
+            searchSpinner.heightAnchor.constraint(equalToConstant: 16),
             queryField.leadingAnchor.constraint(equalTo: searchIcon.trailingAnchor, constant: 10),
-            queryField.trailingAnchor.constraint(equalTo: clearBtn.leadingAnchor, constant: -6),
+            queryField.trailingAnchor.constraint(equalTo: searchSpinner.leadingAnchor, constant: -6),
             queryField.topAnchor.constraint(equalTo: searchCard.topAnchor),
             queryField.bottomAnchor.constraint(equalTo: searchCard.bottomAnchor),
 
@@ -385,13 +443,26 @@ final class SearchWindowController: NSWindowController, NSWindowDelegate, NSTabl
 
             footerLabel.leadingAnchor.constraint(equalTo: searchCard.leadingAnchor),
             footerLabel.bottomAnchor.constraint(equalTo: mainPane.bottomAnchor, constant: -14),
-            footerHints.trailingAnchor.constraint(equalTo: searchCard.trailingAnchor),
+            footerLabel.trailingAnchor.constraint(lessThanOrEqualTo: footerHints.leadingAnchor, constant: -12),
+
+            // 快捷键徽章：右下角，文字在徽章内水平+垂直居中
+            hotkeyBadge.centerYAnchor.constraint(equalTo: footerLabel.centerYAnchor),
+            hotkeyBadge.trailingAnchor.constraint(equalTo: searchCard.trailingAnchor),
+            hotkeyBadge.heightAnchor.constraint(equalToConstant: 26),
+            hotkeyBadgeLabel.centerXAnchor.constraint(equalTo: hotkeyBadge.centerXAnchor),
+            hotkeyBadgeLabel.centerYAnchor.constraint(equalTo: hotkeyBadge.centerYAnchor, constant: -0.5),
+            hotkeyBadgeLabel.leadingAnchor.constraint(equalTo: hotkeyBadge.leadingAnchor, constant: 10),
+            hotkeyBadgeLabel.trailingAnchor.constraint(equalTo: hotkeyBadge.trailingAnchor, constant: -10),
+
             footerHints.centerYAnchor.constraint(equalTo: footerLabel.centerYAnchor),
+            footerHints.trailingAnchor.constraint(equalTo: hotkeyBadge.leadingAnchor, constant: -12),
         ])
 
         rebuildCategorySidebar()
         rebuildLocationSidebar()
+        applyLocalizedCopy()
         refreshHotkeyBadge()
+        AppPrefs.applyAppearance()
 
         settingsWC.onHotKeyChanged = { [weak self] cfg in
             self?.hotKeyHandler?(cfg)
@@ -399,16 +470,75 @@ final class SearchWindowController: NSWindowController, NSWindowDelegate, NSTabl
         }
         settingsWC.onRequestRebuild = { [weak self] in self?.rebuildHandler?() }
 
+        NotificationCenter.default.addObserver(
+            forName: .ffPrefsChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.applyLocalizedCopy()
+            self?.rebuildCategorySidebar()
+            self?.rebuildLocationSidebar()
+            self?.applyThemeColors()
+            self?.refreshHotkeyBadge()
+            self?.updateFooter()
+            self?.tableView.reloadData()
+        }
+
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
             self?.handleKey(e) ?? e
         }
     }
 
-    private func makeSectionLabel(_ t: String) -> NSTextField {
-        let l = NSTextField(labelWithString: t)
-        l.font = Theme.songBold(11)
-        l.textColor = Theme.metaText
-        return l
+    private func applyLocalizedCopy() {
+        locTitle.stringValue = L10n.locations
+        headline.stringValue = L10n.searchHeadline
+        subhead.stringValue = L10n.searchSubhead
+        footerHints.stringValue = L10n.footerHints
+        queryField.placeholderString = L10n.searchPlaceholder
+        if let cell = queryField.cell as? NSTextFieldCell {
+            cell.placeholderAttributedString = NSAttributedString(
+                string: L10n.searchPlaceholder,
+                attributes: [.font: Theme.songBold(15), .foregroundColor: NSColor.placeholderTextColor]
+            )
+        }
+        typeFilter.item(at: 0)?.title = L10n.type
+        timeFilter.item(at: 0)?.title = L10n.modified
+        sizeFilter.item(at: 0)?.title = L10n.size
+        locFilter.item(at: 0)?.title = L10n.location
+        sortPopup.item(at: 0)?.title = currentSort.rawValue
+        rebuildContentSearchPopup()
+    }
+
+    private func rebuildContentSearchPopup() {
+        contentSearchPopup.removeAllItems()
+        contentSearchPopup.addItem(withTitle: L10n.contentSearchOff)
+        contentSearchPopup.lastItem?.tag = 0
+        contentSearchPopup.addItem(withTitle: L10n.contentSearchOn)
+        contentSearchPopup.lastItem?.tag = 1
+        contentSearchPopup.selectItem(withTag: AppPrefs.contentSearchEnabled ? 1 : 0)
+    }
+
+    @objc private func contentSearchModeChanged(_ sender: NSPopUpButton) {
+        let wantOn = sender.selectedTag() == 1
+        let wasOn = AppPrefs.contentSearchEnabled
+        AppPrefs.contentSearchEnabled = wantOn
+        if wantOn, !wasOn {
+            let alert = NSAlert()
+            alert.messageText = L10n.contentSearchAlertTitle
+            alert.informativeText = L10n.contentSearchAlertMessage
+            alert.alertStyle = .informational
+            alert.addButton(withTitle: L10n.contentSearchAlertOK)
+            if let window {
+                alert.beginSheetModal(for: window) { [weak self] _ in
+                    self?.runSearch()
+                }
+            } else {
+                alert.runModal()
+                runSearch()
+            }
+        } else {
+            runSearch()
+        }
     }
 
     private func configureFilter(_ btn: NSPopUpButton, title: String, items: [(String, String)], action: Selector) {
@@ -438,7 +568,7 @@ final class SearchWindowController: NSWindowController, NSWindowDelegate, NSTabl
         categoryButtons.removeAll()
         for cat in IndexEngine.Category.allCases {
             let count = categoryCounts[cat] ?? (cat == .all ? hits.count : 0)
-            let row = SidebarRowButton(title: cat.rawValue, symbol: cat.symbol, count: count)
+            let row = SidebarRowButton(title: L10n.category(cat), symbol: cat.symbol, count: count)
             row.isSelected = (cat == selectedCategory)
             row.onTap = { [weak self] in
                 self?.selectedCategory = cat
@@ -455,7 +585,7 @@ final class SearchWindowController: NSWindowController, NSWindowDelegate, NSTabl
         locationStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         locationButtons.removeAll()
 
-        let all = SidebarRowButton(title: "全部位置", symbol: "internaldrive", count: nil)
+        let all = SidebarRowButton(title: L10n.allLocations, symbol: "internaldrive", count: nil)
         all.isSelected = selectedLocationPath == nil
         all.onTap = { [weak self] in
             self?.selectedLocationPath = nil
@@ -466,7 +596,6 @@ final class SearchWindowController: NSWindowController, NSWindowDelegate, NSTabl
         locationStack.addArrangedSubview(all)
         all.widthAnchor.constraint(equalTo: locationStack.widthAnchor).isActive = true
 
-        // Macintosh HD
         let hd = SidebarRowButton(title: "Macintosh HD", symbol: "desktopcomputer", count: nil)
         hd.isSelected = selectedLocationPath == "/"
         hd.onTap = { [weak self] in
@@ -480,7 +609,8 @@ final class SearchWindowController: NSWindowController, NSWindowDelegate, NSTabl
 
         for loc in IndexEngine.shared.indexedLocations() where loc.path != "/" {
             let path = loc.path
-            let row = SidebarRowButton(title: loc.title, symbol: "folder", count: nil)
+            let title = L10n.locationTitle(path, fallback: loc.title)
+            let row = SidebarRowButton(title: title, symbol: "folder", count: nil)
             row.isSelected = selectedLocationPath == path
             row.onTap = { [weak self] in
                 self?.selectedLocationPath = path
@@ -492,13 +622,12 @@ final class SearchWindowController: NSWindowController, NSWindowDelegate, NSTabl
             row.widthAnchor.constraint(equalTo: locationStack.widthAnchor).isActive = true
         }
 
-        let add = SidebarRowButton(title: "添加位置…", symbol: "plus", count: nil)
+        let add = SidebarRowButton(title: L10n.addLocation, symbol: "plus", count: nil)
         add.isAddStyle = true
         add.onTap = { [weak self] in self?.addLocation() }
         locationStack.addArrangedSubview(add)
         add.widthAnchor.constraint(equalTo: locationStack.widthAnchor).isActive = true
 
-        // 同步顶栏位置筛选
         refreshLocFilterMenu()
     }
 
@@ -520,47 +649,65 @@ final class SearchWindowController: NSWindowController, NSWindowDelegate, NSTabl
 
     // MARK: - Present
 
+    /// 避免连点开关时重复排队动画
+    private var isPresenting = false
+    private var isDismissing = false
+
     func present() {
         guard let window else { return }
-        applyThemeColors()
-        rebuildLocationSidebar()
+        if window.isVisible, !isDismissing {
+            // 已在前台：只聚焦，不重做整套动画/重建
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+            window.makeFirstResponder(queryField)
+            return
+        }
+        if isPresenting { return }
+        isPresenting = true
+        isDismissing = false
+
+        // 轻量刷新：不重建侧边栏、不 reload 整表（打开时最卡的点）
+        applyThemeColors(light: true)
         refreshHotkeyBadge()
 
-        let end = targetFrame(window)
-        var start = end
-        start.size.width *= 0.97
-        start.size.height *= 0.97
-        start.origin.x = end.midX - start.width / 2
-        start.origin.y = end.origin.y - 12
-        window.setFrame(start, display: true)
+        let frame = targetFrame(window)
+        // display:false 避免 setFrame 同步强制绘制
         window.alphaValue = 0
+        window.setFrame(frame, display: false)
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(queryField)
 
+        // 仅淡入，不做缩放/位移（复杂 Auto Layout 窗口缩放会明显卡顿）
         NSAnimationContext.runAnimationGroup({ ctx in
-            ctx.duration = 0.34
-            ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.16, 1, 0.3, 1)
+            ctx.duration = 0.14
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            ctx.allowsImplicitAnimation = true
             window.animator().alphaValue = 1
-            window.animator().setFrame(end, display: true)
+        }, completionHandler: { [weak self] in
+            self?.isPresenting = false
         })
+
         if !queryField.stringValue.isEmpty { runSearch() }
         else { updateFooter() }
     }
 
     func dismissAnimated() {
         guard let window, window.isVisible else { return }
-        var end = window.frame
-        end.origin.y -= 8
-        end.size.width *= 0.98
-        end.size.height *= 0.98
+        if isDismissing { return }
+        isDismissing = true
+        isPresenting = false
+
+        // 仅淡出；不做 frame 动画，关闭更顺滑
         NSAnimationContext.runAnimationGroup({ ctx in
-            ctx.duration = 0.2
+            ctx.duration = 0.1
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            ctx.allowsImplicitAnimation = true
             window.animator().alphaValue = 0
-            window.animator().setFrame(end, display: true)
-        }, completionHandler: {
+        }, completionHandler: { [weak self] in
             window.orderOut(nil)
             window.alphaValue = 1
+            self?.isDismissing = false
         })
     }
 
@@ -571,11 +718,46 @@ final class SearchWindowController: NSWindowController, NSWindowDelegate, NSTabl
         return NSRect(x: v.midX - size.width / 2, y: v.midY - size.height / 2 + 30, width: size.width, height: size.height)
     }
 
-    private func applyThemeColors() {
+    /// - Parameter light: 打开窗口时用轻量路径（不 reload 表格、不重建按钮颜色过多）
+    private func applyThemeColors(light: Bool = false) {
+        // 显式按 AppPrefs 解析颜色，避免 layer CGColor 不随外观更新
         sidebar.layer?.backgroundColor = Theme.sidebarBg.cgColor
         mainPane.layer?.backgroundColor = Theme.contentBg.cgColor
         rootView.layer?.borderColor = Theme.subtleBorder.cgColor
+        rootView.layer?.backgroundColor = Theme.contentBg.cgColor
         searchCard.layer?.backgroundColor = Theme.contentBg.cgColor
+        searchCard.layer?.borderColor = Theme.searchBorder.cgColor
+        hotkeyBadge.layer?.backgroundColor = Theme.chipBg.cgColor
+
+        headline.textColor = Theme.titleText
+        subhead.textColor = Theme.secondaryText
+        brandLabel.textColor = Theme.titleText
+        brandIcon.contentTintColor = Theme.accent
+        footerLabel.textColor = Theme.secondaryText
+        footerHints.textColor = Theme.metaText
+        hotkeyBadgeLabel.textColor = Theme.secondaryText
+        searchIcon.contentTintColor = Theme.secondaryText
+        clearBtn.contentTintColor = Theme.metaText
+        sidebarSettingsBtn.contentTintColor = Theme.secondaryText
+        locTitle.textColor = Theme.metaText
+
+        // 窗口外观与全局一致
+        if let named = NSApp.appearance?.name {
+            window?.appearance = NSAppearance(named: named)
+        } else {
+            window?.appearance = nil
+        }
+
+        if light {
+            tableView.backgroundColor = .clear
+            return
+        }
+
+        categoryButtons.values.forEach { $0.refreshColors() }
+        locationButtons.values.forEach { $0.refreshColors() }
+        tableView.reloadData()
+        tableView.backgroundColor = .clear
+        updateViewToggle()
     }
 
     func setIndexStatus(_ text: String) {
@@ -587,8 +769,7 @@ final class SearchWindowController: NSWindowController, NSWindowDelegate, NSTabl
     func updateHotKeyHint() { refreshHotkeyBadge() }
 
     private func refreshHotkeyBadge() {
-        let d = HotKeyConfig.load().display
-        hotkeyBadge.stringValue = "  \(d)  "
+        hotkeyBadgeLabel.stringValue = HotKeyConfig.load().display
     }
 
     // MARK: - Search
@@ -603,10 +784,10 @@ final class SearchWindowController: NSWindowController, NSWindowDelegate, NSTabl
         opt.fileExtension = filterExt
         opt.minSize = filterMinSize
         opt.maxSize = filterMaxSize
+        opt.searchContent = AppPrefs.contentSearchEnabled
         if let days = filterModifiedDays {
             opt.modifiedAfter = Calendar.current.date(byAdding: .day, value: -days, to: Date())
         }
-        // 类型快捷：folder/app 映射到 category
         return opt
     }
 
@@ -629,6 +810,7 @@ final class SearchWindowController: NSWindowController, NSWindowDelegate, NSTabl
         }
 
         if q.isEmpty {
+            setSearching(false)
             hits = []
             categoryCounts = [:]
             lastMs = 0
@@ -638,26 +820,73 @@ final class SearchWindowController: NSWindowController, NSWindowDelegate, NSTabl
             return
         }
 
+        let wantContent = opt.searchContent
+        let groupFilter = filterExt
+        // 正文搜索较慢：立刻显示转圈 + 底部提示；文件名先出结果
+        setSearching(true, content: wantContent)
+
         DispatchQueue.global(qos: .userInteractive).async { [weak self] in
-            let result = IndexEngine.shared.search(query: q, options: opt)
-            var list = result.hits
-            // 图片/文档等扩展组过滤
-            if let g = self?.filterExt, ["image", "doc", "sheet", "slide", "video", "audio", "archive", "code"].contains(g) {
-                list = list.filter { Self.matchesGroup(g, hit: $0) }
+            guard let self else { return }
+
+            // 第一阶段：仅文件名（毫秒级），先让用户看到结果
+            var nameOpt = opt
+            nameOpt.searchContent = false
+            let nameResult = IndexEngine.shared.search(query: q, options: nameOpt)
+            var nameList = nameResult.hits
+            if let g = groupFilter, ["image", "doc", "sheet", "slide", "video", "audio", "archive", "code"].contains(g) {
+                nameList = nameList.filter { Self.matchesGroup(g, hit: $0) }
+            }
+
+            DispatchQueue.main.async {
+                guard gen == self.searchGeneration else { return }
+                self.applySearchResults(hits: nameList, counts: nameResult.counts, ms: nameResult.elapsedMs)
+                if wantContent {
+                    // 文件名结果已出，继续提示正在搜正文
+                    self.setSearching(true, content: true)
+                } else {
+                    self.setSearching(false)
+                }
+            }
+
+            guard wantContent else { return }
+
+            // 第二阶段：含正文（Spotlight，可能数秒）
+            let fullResult = IndexEngine.shared.search(query: q, options: opt)
+            var fullList = fullResult.hits
+            if let g = groupFilter, ["image", "doc", "sheet", "slide", "video", "audio", "archive", "code"].contains(g) {
+                fullList = fullList.filter { Self.matchesGroup(g, hit: $0) }
             }
             DispatchQueue.main.async {
-                guard let self, gen == self.searchGeneration else { return }
-                self.hits = list
-                self.categoryCounts = result.counts
-                self.lastMs = result.elapsedMs
-                self.tableView.reloadData()
-                if !list.isEmpty {
-                    self.tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
-                }
-                self.rebuildCategorySidebar()
-                self.updateFooter()
+                guard gen == self.searchGeneration else { return }
+                self.applySearchResults(hits: fullList, counts: fullResult.counts, ms: fullResult.elapsedMs)
+                self.setSearching(false)
             }
         }
+    }
+
+    private func applySearchResults(hits list: [IndexEngine.Hit], counts: [IndexEngine.Category: Int], ms: Double) {
+        hits = list
+        categoryCounts = counts
+        lastMs = ms
+        tableView.reloadData()
+        if !list.isEmpty {
+            tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        }
+        rebuildCategorySidebar()
+        updateFooter()
+    }
+
+    private func setSearching(_ on: Bool, content: Bool = false) {
+        isSearching = on
+        searchingIsContent = on && content
+        if on {
+            searchSpinner.isHidden = false
+            searchSpinner.startAnimation(nil)
+        } else {
+            searchSpinner.stopAnimation(nil)
+            searchSpinner.isHidden = true
+        }
+        updateFooter()
     }
 
     private static func matchesGroup(_ g: String, hit: IndexEngine.Hit) -> Bool {
@@ -678,11 +907,38 @@ final class SearchWindowController: NSWindowController, NSWindowDelegate, NSTabl
     private func updateFooter() {
         if queryField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             footerLabel.stringValue = IndexEngine.shared.isIndexing
-                ? "索引中… \(IndexEngine.shared.fileCount) 项"
-                : "索引 \(IndexEngine.shared.fileCount) 项 · 输入关键词开始搜索"
-        } else {
-            footerLabel.stringValue = String(format: "共找到 %d 个结果 · %.1f ms", hits.count, lastMs)
+                ? String(format: L10n.indexingFormat, IndexEngine.shared.fileCount)
+                : String(format: L10n.indexFormat, IndexEngine.shared.fileCount)
+            return
         }
+
+        if isSearching {
+            if searchingIsContent {
+                // 已有文件名结果时，说明在补充正文
+                if hits.isEmpty {
+                    footerLabel.stringValue = L10n.searchingContentHint
+                } else {
+                    footerLabel.stringValue = String(format: L10n.foundFormat, hits.count, lastMs)
+                        + " · "
+                        + L10n.searchingContent
+                }
+            } else {
+                footerLabel.stringValue = L10n.searching
+            }
+            return
+        }
+
+        var s = String(format: L10n.foundFormat, hits.count, lastMs)
+        if AppPrefs.contentSearchEnabled {
+            let contentOnly = hits.filter { $0.matchKind == .content }.count
+            let both = hits.filter { $0.matchKind == .both }.count
+            if contentOnly + both > 0 {
+                s += L10n.t(" · 含内容命中 \(contentOnly + both)", " · content hits \(contentOnly + both)")
+            } else if lastMs > 500 {
+                s += L10n.t(" · 正文无额外命中（依赖系统 Spotlight）", " · no extra content hits (Spotlight)")
+            }
+        }
+        footerLabel.stringValue = s
     }
 
     // MARK: - Filters actions
@@ -911,6 +1167,8 @@ private final class SidebarRowButton: NSView {
         }
     }
 
+    func refreshColors() { apply() }
+
     override func mouseDown(with event: NSEvent) { onTap?() }
     override func draw(_ dirtyRect: NSRect) { /* layer backed */ }
 }
@@ -925,6 +1183,7 @@ private final class ResultRowView: NSTableCellView {
     private let pathLabel = NSTextField(labelWithString: "")
     private let sizeLabel = NSTextField(labelWithString: "")
     private let dateLabel = NSTextField(labelWithString: "")
+    private let matchBadge = NSTextField(labelWithString: "")
 
     init(style: Style) {
         self.style = style
@@ -946,12 +1205,21 @@ private final class ResultRowView: NSTableCellView {
         dateLabel.textColor = Theme.metaText
         dateLabel.alignment = .right
         dateLabel.translatesAutoresizingMaskIntoConstraints = false
+        matchBadge.font = Theme.songBold(10)
+        matchBadge.alignment = .center
+        matchBadge.isBezeled = false
+        matchBadge.drawsBackground = false
+        matchBadge.isEditable = false
+        matchBadge.wantsLayer = true
+        matchBadge.layer?.cornerRadius = 4
+        matchBadge.translatesAutoresizingMaskIntoConstraints = false
 
         addSubview(iconView)
         addSubview(nameLabel)
         addSubview(pathLabel)
         addSubview(sizeLabel)
         addSubview(dateLabel)
+        addSubview(matchBadge)
 
         let iconSize: CGFloat = style == .list ? 28 : 40
         NSLayoutConstraint.activate([
@@ -968,8 +1236,12 @@ private final class ResultRowView: NSTableCellView {
             sizeLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
             sizeLabel.widthAnchor.constraint(equalToConstant: 72),
 
+            matchBadge.trailingAnchor.constraint(equalTo: sizeLabel.leadingAnchor, constant: -8),
+            matchBadge.centerYAnchor.constraint(equalTo: centerYAnchor),
+            matchBadge.widthAnchor.constraint(greaterThanOrEqualToConstant: 36),
+
             nameLabel.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 12),
-            nameLabel.trailingAnchor.constraint(equalTo: sizeLabel.leadingAnchor, constant: -12),
+            nameLabel.trailingAnchor.constraint(equalTo: matchBadge.leadingAnchor, constant: -8),
             nameLabel.topAnchor.constraint(equalTo: topAnchor, constant: style == .list ? 10 : 12),
 
             pathLabel.leadingAnchor.constraint(equalTo: nameLabel.leadingAnchor),
@@ -995,6 +1267,22 @@ private final class ResultRowView: NSTableCellView {
             sizeLabel.stringValue = ""
         }
         dateLabel.stringValue = hit.modifiedAt.map { Self.fmtDate($0) } ?? ""
+
+        switch hit.matchKind {
+        case .name:
+            matchBadge.stringValue = ""
+            matchBadge.isHidden = true
+        case .content:
+            matchBadge.isHidden = false
+            matchBadge.stringValue = " \(L10n.matchContent) "
+            matchBadge.textColor = Theme.accent
+            matchBadge.layer?.backgroundColor = Theme.accentSoft.cgColor
+        case .both:
+            matchBadge.isHidden = false
+            matchBadge.stringValue = " \(L10n.matchBoth) "
+            matchBadge.textColor = Theme.accent
+            matchBadge.layer?.backgroundColor = Theme.accentSoft.cgColor
+        }
     }
 
     private static let df: DateFormatter = {

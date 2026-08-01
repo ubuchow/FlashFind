@@ -6,6 +6,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hotKey: HotKey?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        AppPrefs.applyAppearance()
+
         searchWC = SearchWindowController()
         searchWC.hotKeyHandler = { [weak self] cfg in
             _ = self?.hotKey?.rebind(

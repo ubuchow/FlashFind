@@ -22,6 +22,12 @@ final class IndexEngine: @unchecked Sendable {
         }
     }
 
+    enum MatchKind: Sendable {
+        case name
+        case content
+        case both
+    }
+
     struct Hit: Sendable {
         let name: String
         let path: String
@@ -33,6 +39,8 @@ final class IndexEngine: @unchecked Sendable {
         var modifiedAt: Date?
         /// 相关度排序用：是否前缀匹配
         var isPrefixMatch: Bool = false
+        /// 匹配来源：文件名 / 内容 / 两者
+        var matchKind: MatchKind = .name
 
         var parentPath: String {
             (path as NSString).deletingLastPathComponent
@@ -71,6 +79,8 @@ final class IndexEngine: @unchecked Sendable {
         var limit: Int = 200
         /// UI 需要始终显示大小/时间
         var alwaysEnrich: Bool = true
+        /// 是否同时搜文件内容（Spotlight）
+        var searchContent: Bool = false
     }
 
     enum SortKey: String, CaseIterable, Sendable {
@@ -312,21 +322,60 @@ final class IndexEngine: @unchecked Sendable {
             hits = hits.filter { $0.category == options.category }
         }
 
-        // 相关度预排后截断
-        hits.sort { a, b in
-            if a.isPrefixMatch != b.isPrefixMatch { return a.isPrefixMatch && !b.isPrefixMatch }
-            if a.name.count != b.name.count { return a.name.count < b.name.count }
-            return a.name.localizedStandardCompare(b.name) == .orderedAscending
-        }
-        if hits.count > limit {
-            hits = Array(hits.prefix(limit))
+        // 内容搜索：Spotlight（不自建全文索引，内存极低）
+        // 注意：mdfind 常需数秒，必须在后台队列调用（UI 已在 global 队列）
+        if options.searchContent {
+            var scope: [String] = []
+            if let loc = options.locationPrefix, loc != "/" {
+                scope = [loc]
+            } else {
+                scope = indexedLocations().map(\.path).filter { $0 != "/" }
+                // 索引位置为空时回退到用户主目录，否则正文搜永远无结果
+                if scope.isEmpty {
+                    scope = [FileManager.default.homeDirectoryForCurrentUser.path]
+                }
+            }
+            let contentPaths = ContentSearch.paths(keyword: q, onlyIn: scope)
+            if !contentPaths.isEmpty {
+                var byPath: [String: Int] = [:]
+                for (i, h) in hits.enumerated() { byPath[h.path] = i }
+                for p in contentPaths {
+                    if let locPrefix, !p.hasPrefix(locPrefix) { continue }
+                    if let i = byPath[p] {
+                        if hits[i].matchKind == .name { hits[i].matchKind = .both }
+                        continue
+                    }
+                    let name = (p as NSString).lastPathComponent
+                    let isDir: Bool = {
+                        var isDir: ObjCBool = false
+                        FileManager.default.fileExists(atPath: p, isDirectory: &isDir)
+                        return isDir.boolValue
+                    }()
+                    let ext = isDir ? "" : (name as NSString).pathExtension.lowercased()
+                    if let want = options.fileExtension, ext != want { continue }
+                    let hit = Hit(
+                        name: name,
+                        path: p,
+                        isDirectory: isDir,
+                        fileExtension: ext,
+                        isPrefixMatch: name.lowercased().hasPrefix(needle),
+                        matchKind: .content
+                    )
+                    if options.category != .all, hit.category != options.category { continue }
+                    hits.append(hit)
+                    byPath[p] = hits.count - 1
+                }
+                counts = [.all: hits.count, .file: 0, .folder: 0, .app: 0, .other: 0]
+                for h in hits { counts[h.category, default: 0] += 1 }
+                counts[.all] = hits.count
+            }
         }
 
-        if options.alwaysEnrich || options.sort.needsMetadata || options.minSize != nil || options.maxSize != nil || options.modifiedAfter != nil {
+        if options.alwaysEnrich || options.sort.needsMetadata
+            || options.minSize != nil || options.maxSize != nil || options.modifiedAfter != nil {
             enrichMetadata(&hits)
         }
 
-        // 大小 / 时间过滤（依赖元数据）
         if let minS = options.minSize {
             hits = hits.filter { $0.fileSize >= minS }
         }
@@ -338,6 +387,36 @@ final class IndexEngine: @unchecked Sendable {
         }
 
         hits = Self.sortHits(hits, by: options.sort, needle: needle)
+        if options.searchContent {
+            // 文件名命中优先于纯内容命中（稳定排序）
+            hits = hits.enumerated().sorted { a, b in
+                func rank(_ m: MatchKind) -> Int {
+                    switch m {
+                    case .both: return 0
+                    case .name: return 1
+                    case .content: return 2
+                    }
+                }
+                let ra = rank(a.element.matchKind), rb = rank(b.element.matchKind)
+                if ra != rb { return ra < rb }
+                return a.offset < b.offset
+            }.map(\.element)
+        }
+
+        if hits.count > limit {
+            if options.searchContent {
+                // 截断时为纯正文命中预留名额，避免全是文件名结果把花名册等挤掉
+                let nameSide = hits.filter { $0.matchKind != .content }
+                let contentSide = hits.filter { $0.matchKind == .content }
+                let reserve = min(80, contentSide.count, max(0, limit / 3))
+                let nameCap = limit - reserve
+                let keptName = Array(nameSide.prefix(nameCap))
+                let keptContent = Array(contentSide.prefix(limit - keptName.count))
+                hits = keptName + keptContent
+            } else {
+                hits = Array(hits.prefix(limit))
+            }
+        }
 
         let ms = (CFAbsoluteTimeGetCurrent() - t0) * 1000
         return (hits, counts, ms)
