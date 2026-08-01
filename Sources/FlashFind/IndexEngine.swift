@@ -138,18 +138,26 @@ final class IndexEngine: @unchecked Sendable {
         queue.sync {
             roots.map { url in
                 let title: String
-                switch url.lastPathComponent {
-                case "Desktop": title = "桌面"
-                case "Documents": title = "文档"
-                case "Downloads": title = "下载"
-                case "Applications": title = "应用"
-                case "Movies": title = "影片"
-                case "Music": title = "音乐"
-                case "Pictures": title = "图片"
-                default:
-                    title = url.path == "/" ? "Macintosh HD" : url.lastPathComponent
+                let path = url.path
+                if path == "/" {
+                    title = "Macintosh HD"
+                } else if path == "/Applications" {
+                    title = "系统应用"
+                } else if path.hasSuffix("/Applications") && path.contains(NSHomeDirectory()) {
+                    title = "用户应用"
+                } else {
+                    switch url.lastPathComponent {
+                    case "Desktop": title = "桌面"
+                    case "Documents": title = "文档"
+                    case "Downloads": title = "下载"
+                    case "Movies": title = "影片"
+                    case "Music": title = "音乐"
+                    case "Pictures": title = "图片"
+                    case "Applications": title = "应用"
+                    default: title = url.lastPathComponent
+                    }
                 }
-                return LocationItem(title: title, path: url.path)
+                return LocationItem(title: title, path: path)
             }
         }
     }

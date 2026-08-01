@@ -111,7 +111,7 @@ final class SearchWindowController: NSWindowController, NSWindowDelegate, NSTabl
         brandIcon.image = NSImage(systemSymbolName: "bolt.fill", accessibilityDescription: nil)
         brandIcon.contentTintColor = Theme.accent
         brandIcon.translatesAutoresizingMaskIntoConstraints = false
-        brandLabel.font = Theme.ui(15, weight: .semibold)
+        brandLabel.font = Theme.songBold(15)
         brandLabel.textColor = Theme.titleText
         brandLabel.translatesAutoresizingMaskIntoConstraints = false
         sidebar.addSubview(brandIcon)
@@ -148,13 +148,13 @@ final class SearchWindowController: NSWindowController, NSWindowDelegate, NSTabl
         mainPane.translatesAutoresizingMaskIntoConstraints = false
         rootView.addSubview(mainPane)
 
-        headline.font = Theme.ui(22, weight: .bold)
+        headline.font = Theme.songBold(22)
         headline.textColor = Theme.titleText
         headline.translatesAutoresizingMaskIntoConstraints = false
-        subhead.font = Theme.ui(12.5)
+        subhead.font = Theme.songBold(12.5)
         subhead.textColor = Theme.secondaryText
         subhead.translatesAutoresizingMaskIntoConstraints = false
-        hotkeyBadge.font = Theme.ui(11, weight: .medium)
+        hotkeyBadge.font = Theme.songBold(11)
         hotkeyBadge.textColor = Theme.secondaryText
         hotkeyBadge.alignment = .center
         hotkeyBadge.wantsLayer = true
@@ -179,7 +179,7 @@ final class SearchWindowController: NSWindowController, NSWindowDelegate, NSTabl
         searchIcon.contentTintColor = Theme.secondaryText
         searchIcon.translatesAutoresizingMaskIntoConstraints = false
         queryField.placeholderString = "输入关键词搜索…"
-        queryField.font = Theme.ui(15)
+        queryField.font = Theme.songBold(15)
         queryField.isBordered = false
         queryField.drawsBackground = false
         queryField.focusRingType = .none
@@ -188,7 +188,7 @@ final class SearchWindowController: NSWindowController, NSWindowDelegate, NSTabl
         if let cell = queryField.cell as? NSTextFieldCell {
             cell.placeholderAttributedString = NSAttributedString(
                 string: "输入关键词搜索…",
-                attributes: [.font: Theme.ui(15), .foregroundColor: NSColor.placeholderTextColor]
+                attributes: [.font: Theme.songBold(15), .foregroundColor: NSColor.placeholderTextColor]
             )
         }
         clearBtn.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "清除")
@@ -292,10 +292,10 @@ final class SearchWindowController: NSWindowController, NSWindowDelegate, NSTabl
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         mainPane.addSubview(scrollView)
 
-        footerLabel.font = Theme.ui(11)
+        footerLabel.font = Theme.songBold(11)
         footerLabel.textColor = Theme.secondaryText
         footerLabel.translatesAutoresizingMaskIntoConstraints = false
-        footerHints.font = Theme.ui(11)
+        footerHints.font = Theme.songBold(11)
         footerHints.textColor = Theme.metaText
         footerHints.alignment = .right
         footerHints.translatesAutoresizingMaskIntoConstraints = false
@@ -406,7 +406,7 @@ final class SearchWindowController: NSWindowController, NSWindowDelegate, NSTabl
 
     private func makeSectionLabel(_ t: String) -> NSTextField {
         let l = NSTextField(labelWithString: t)
-        l.font = Theme.ui(11, weight: .medium)
+        l.font = Theme.songBold(11)
         l.textColor = Theme.metaText
         return l
     }
@@ -423,7 +423,7 @@ final class SearchWindowController: NSWindowController, NSWindowDelegate, NSTabl
             item.representedObject = value
             btn.menu?.addItem(item)
         }
-        btn.font = Theme.ui(12)
+        btn.font = Theme.songBold(12)
     }
 
     private func styleChipPopup(_ btn: NSPopUpButton) {
@@ -870,9 +870,9 @@ private final class SidebarRowButton: NSView {
         icon.image?.isTemplate = true
         icon.translatesAutoresizingMaskIntoConstraints = false
         label.stringValue = title
-        label.font = Theme.ui(12.5)
+        label.font = Theme.songBold(12.5)
         label.translatesAutoresizingMaskIntoConstraints = false
-        badge.font = Theme.ui(11)
+        badge.font = Theme.songBold(11)
         badge.textColor = Theme.metaText
         badge.alignment = .right
         badge.translatesAutoresizingMaskIntoConstraints = false
@@ -931,18 +931,18 @@ private final class ResultRowView: NSTableCellView {
         super.init(frame: .zero)
         iconView.translatesAutoresizingMaskIntoConstraints = false
         iconView.imageScaling = .scaleProportionallyUpOrDown
-        nameLabel.font = Theme.ui(13.5, weight: .medium)
+        nameLabel.font = Theme.songBold(13.5)
         nameLabel.lineBreakMode = .byTruncatingMiddle
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
-        pathLabel.font = Theme.ui(11)
+        pathLabel.font = Theme.songBold(11)
         pathLabel.textColor = Theme.secondaryText
         pathLabel.lineBreakMode = .byTruncatingMiddle
         pathLabel.translatesAutoresizingMaskIntoConstraints = false
-        sizeLabel.font = Theme.ui(11)
+        sizeLabel.font = Theme.songBold(11)
         sizeLabel.textColor = Theme.secondaryText
         sizeLabel.alignment = .right
         sizeLabel.translatesAutoresizingMaskIntoConstraints = false
-        dateLabel.font = Theme.ui(11)
+        dateLabel.font = Theme.songBold(11)
         dateLabel.textColor = Theme.metaText
         dateLabel.alignment = .right
         dateLabel.translatesAutoresizingMaskIntoConstraints = false

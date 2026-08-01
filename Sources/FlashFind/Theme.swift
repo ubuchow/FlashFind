@@ -13,9 +13,9 @@ enum Theme {
         return NSFont.systemFont(ofSize: size)
     }
 
-    /// UI 用系统字体更接近设计稿（数字/标签清晰）
+    /// 统一走宋体加粗（兼容旧调用）
     static func ui(_ size: CGFloat, weight: NSFont.Weight = .regular) -> NSFont {
-        NSFont.systemFont(ofSize: size, weight: weight)
+        songBold(size)
     }
 
     static var accent: NSColor {
