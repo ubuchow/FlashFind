@@ -1,25 +1,28 @@
 import AppKit
 
-/// 纯代码矢量图标：菜单栏 template + App 彩色图标，无外部图片依赖
+/// 纯代码矢量图标：菜单栏黄色闪电 + App 彩色图标
 enum MenuBarIcon {
-    /// 菜单栏 18pt template（黑白）
-    static func make(size: CGFloat = 18) -> NSImage {
+    /// 菜单栏黄色闪电（非 template，固定着色）
+    static func make(size: CGFloat = 12) -> NSImage {
         let img = NSImage(size: NSSize(width: size, height: size), flipped: false) { rect in
-            drawMagnifier(in: rect, lineWidth: max(1.35, size * 0.09), color: .black, filledLens: false)
+            let inset = rect.insetBy(dx: size * 0.08, dy: size * 0.06)
+            drawBolt(
+                in: inset,
+                fill: NSColor(calibratedRed: 1.0, green: 0.84, blue: 0.04, alpha: 1),
+                stroke: NSColor(calibratedRed: 0.92, green: 0.58, blue: 0.0, alpha: 1)
+            )
             return true
         }
-        img.isTemplate = true
+        img.isTemplate = false
         return img
     }
 
     /// App 图标（彩色，指定像素边长）
     static func makeAppIcon(pixel: CGFloat) -> NSImage {
         let img = NSImage(size: NSSize(width: pixel, height: pixel), flipped: false) { rect in
-            // 圆角矩形底
-            let radius = pixel * 0.2237 // macOS 风格
+            let radius = pixel * 0.2237
             let path = NSBezierPath(roundedRect: rect.insetBy(dx: pixel * 0.02, dy: pixel * 0.02),
                                     xRadius: radius, yRadius: radius)
-            // 渐变：靛蓝 → 青蓝
             let gradient = NSGradient(colors: [
                 NSColor(calibratedRed: 0.18, green: 0.28, blue: 0.72, alpha: 1),
                 NSColor(calibratedRed: 0.28, green: 0.55, blue: 0.95, alpha: 1),
@@ -27,7 +30,6 @@ enum MenuBarIcon {
             ])
             gradient?.draw(in: path, angle: 135)
 
-            // 轻微高光
             let gloss = NSBezierPath(roundedRect: NSRect(
                 x: rect.minX + pixel * 0.08,
                 y: rect.midY,
@@ -37,66 +39,50 @@ enum MenuBarIcon {
             NSColor.white.withAlphaComponent(0.12).setFill()
             gloss.fill()
 
-            // 白色放大镜
-            let inset = rect.insetBy(dx: pixel * 0.22, dy: pixel * 0.22)
-            drawMagnifier(in: inset, lineWidth: max(2, pixel * 0.055), color: .white, filledLens: false)
-
-            // 小闪光点
-            let spark = pixel * 0.035
-            let srect = NSRect(
-                x: rect.maxX - pixel * 0.30,
-                y: rect.maxY - pixel * 0.32,
-                width: spark * 2,
-                height: spark * 2
-            )
-            NSColor.white.withAlphaComponent(0.95).setFill()
-            NSBezierPath(ovalIn: srect).fill()
-
+            let inset = rect.insetBy(dx: pixel * 0.24, dy: pixel * 0.20)
+            drawBolt(in: inset, fill: .white, stroke: NSColor.white.withAlphaComponent(0.35))
             return true
         }
         img.isTemplate = false
         return img
     }
 
-    /// 在 rect 内绘制居中、比例正确的放大镜
-    private static func drawMagnifier(in rect: NSRect, lineWidth: CGFloat, color: NSColor, filledLens: Bool) {
-        // 统一坐标系：以正方形内容区居中
+    private static func drawBolt(in rect: NSRect, fill: NSColor, stroke: NSColor) {
         let side = min(rect.width, rect.height)
-        let origin = NSPoint(
-            x: rect.midX - side / 2,
-            y: rect.midY - side / 2
-        )
-        let box = NSRect(x: origin.x, y: origin.y, width: side, height: side)
-
-        // 镜面：左上偏，直径约 58%
-        let d = side * 0.58
-        let glass = NSRect(
-            x: box.minX + side * 0.10,
-            y: box.maxY - side * 0.12 - d,
-            width: d,
-            height: d
-        )
-
-        color.setStroke()
-        color.setFill()
-
-        let circle = NSBezierPath(ovalIn: glass)
-        circle.lineWidth = lineWidth
-        if filledLens {
-            color.withAlphaComponent(0.15).setFill()
-            circle.fill()
-            color.setStroke()
+        let ox = rect.midX - side / 2
+        let oy = rect.midY - side / 2
+        func p(_ x: CGFloat, _ y: CGFloat) -> NSPoint {
+            NSPoint(x: ox + x * side, y: oy + y * side)
         }
-        circle.stroke()
 
-        // 手柄：从镜面右下沿 45° 伸出
-        let handle = NSBezierPath()
-        let start = NSPoint(x: glass.midX + d * 0.32, y: glass.midY - d * 0.32)
-        let end = NSPoint(x: box.maxX - side * 0.10, y: box.minY + side * 0.12)
-        handle.move(to: start)
-        handle.line(to: end)
-        handle.lineWidth = lineWidth * 1.15
-        handle.lineCapStyle = .round
-        handle.stroke()
+        let path = NSBezierPath()
+        path.move(to: p(0.58, 0.98))
+        path.line(to: p(0.20, 0.52))
+        path.line(to: p(0.44, 0.52))
+        path.line(to: p(0.30, 0.02))
+        path.line(to: p(0.80, 0.50))
+        path.line(to: p(0.54, 0.50))
+        path.line(to: p(0.72, 0.98))
+        path.close()
+        path.lineJoinStyle = .round
+        path.lineCapStyle = .round
+
+        if NSGraphicsContext.current != nil {
+            NSGraphicsContext.current?.saveGraphicsState()
+            let sh = NSShadow()
+            sh.shadowColor = NSColor.black.withAlphaComponent(0.22)
+            sh.shadowOffset = NSSize(width: 0, height: -0.5)
+            sh.shadowBlurRadius = max(0.6, side * 0.06)
+            sh.set()
+            fill.setFill()
+            path.fill()
+            NSGraphicsContext.current?.restoreGraphicsState()
+        }
+
+        fill.setFill()
+        path.fill()
+        stroke.setStroke()
+        path.lineWidth = max(0.6, side * 0.045)
+        path.stroke()
     }
 }

@@ -28,11 +28,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func setupStatusItem() {
-        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        // 14pt 槽位 + 黄色闪电（非 template）
+        let item = NSStatusBar.system.statusItem(withLength: 14)
         if let btn = item.button {
-            let icon = MenuBarIcon.make(size: 18)
-            icon.isTemplate = true
+            let icon = MenuBarIcon.make(size: 14)
             btn.image = icon
+            btn.image?.isTemplate = false
+            btn.imagePosition = .imageOnly
+            btn.imageScaling = .scaleProportionallyDown
+            btn.title = ""
             btn.toolTip = tooltipText()
             btn.target = self
             btn.action = #selector(statusClicked(_:))
